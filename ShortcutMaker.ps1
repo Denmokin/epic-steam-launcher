@@ -1,4 +1,4 @@
-# Epic -> Steam Shortcut Maker
+﻿# Epic -> Steam Shortcut Maker
 # Lists installed Epic games and adds them to Steam (and optionally Moonlight/Sunshine) using
 # EpicSteamLauncher.exe in --chain mode, so games get Steam's real overlay.
 # Run: powershell -ExecutionPolicy Bypass -File ShortcutMaker.ps1   (add -NoGui -Test for a dry check)
@@ -44,6 +44,7 @@ function Get-EpicGames {
       Kill  = $(if ($k) { $k.Kill } else { @() })
       Icon  = Join-Path $e.dir $e.launchExecutable
       Images = $item.keyImages
+      SteamId = $null
     }
   }
 }
@@ -130,15 +131,53 @@ function Get-Art($g, $tmp) {
   }
   $art
 }
+# ---------------------------------------------------------------- Steam / SteamDB art
+# SteamDB blocks automated access, but every image it shows comes from Steam's own CDN,
+# so we look the game up with Steam's store search and download from the CDN directly.
+function Find-SteamAppId([string]$name) {
+  $hit = Find-SteamAppIdOnce $name
+  if (-not $hit) {
+    # retry without edition suffixes: "X: Complete Edition", "X - Deluxe Edition", "X Enhanced Edition"...
+    $short = ($name -replace '\s*[:\-–]\s*[^:\-–]*(Edition|Collection|Remaster(ed)?|Definitive|GOTY|Game of the Year)\b.*$', '') -replace '\s+(Complete|Deluxe|Gold|Ultimate|Definitive|Enhanced|Special|Standard)\s+Edition$', ''
+    if ($short -ne $name -and $short) { $hit = Find-SteamAppIdOnce $short; if ($hit) { $hit.Exact = $false } }
+  }
+  $hit
+}
+function Find-SteamAppIdOnce([string]$name) {
+  $clean = ($name -replace '[™®©]', '').Trim()
+  try {
+    $r = Invoke-RestMethod ("https://store.steampowered.com/api/storesearch/?term=" + [uri]::EscapeDataString($clean) + "&l=english&cc=US") -UseBasicParsing -TimeoutSec 15
+  } catch { return $null }
+  if (-not $r.items) { return $null }
+  $norm = { param($s) (($s -replace '[™®©]', '') -replace '[^a-z0-9]', '').ToLower() }
+  $exact = $r.items | Where-Object { (& $norm $_.name) -eq (& $norm $clean) } | Select-Object -First 1
+  $hit = if ($exact) { $exact } else { $r.items[0] }
+  [pscustomobject]@{ Id = [string]$hit.id; Name = $hit.name; Exact = [bool]$exact }
+}
+function Get-SteamArt([string]$appid, $tmp) {
+  New-Item -ItemType Directory -Force $tmp | Out-Null
+  $cdn = "https://shared.steamstatic.com/store_item_assets/steam/apps/$appid"
+  $art = @{}
+  foreach ($k in @(@{k='tall'; f=@('library_600x900_2x.jpg','library_600x900.jpg')}, @{k='wide'; f=@('header.jpg')}, @{k='hero'; f=@('library_hero.jpg')}, @{k='logo'; f=@('logo.png')})) {
+    foreach ($file in $k.f) {
+      $dst = Join-Path $tmp "steam-$($k.k)$([IO.Path]::GetExtension($file))"
+      try { Invoke-WebRequest "$cdn/$file" -OutFile $dst -UseBasicParsing -TimeoutSec 20; $art[$k.k] = $dst; break } catch {}
+    }
+  }
+  $art
+}
+
 function Install-Art($art, $gridDir, [uint32]$appid) {
   New-Item -ItemType Directory -Force $gridDir | Out-Null
   if ($art.tall) { Save-Fitted $art.tall (Join-Path $gridDir "${appid}p.jpg") 600 900 }
-  if ($art.wide) { Save-Fitted $art.wide (Join-Path $gridDir "$appid.jpg") 920 430; Save-Fitted $art.wide (Join-Path $gridDir "${appid}_hero.jpg") 1920 620 }
+  if ($art.wide) { Save-Fitted $art.wide (Join-Path $gridDir "$appid.jpg") 920 430 }
+  $heroSrc = if ($art.hero) { $art.hero } else { $art.wide }
+  if ($heroSrc) { Save-Fitted $heroSrc (Join-Path $gridDir "${appid}_hero.jpg") 1920 620 }
   if ($art.logo) { Copy-Item $art.logo (Join-Path $gridDir "${appid}_logo.png") -Force }
 }
 
 # ---------------------------------------------------------------- main action
-function Invoke-Make($games, $accounts, [bool]$moonlight, $log) {
+function Invoke-Make($games, $accounts, [bool]$moonlight, $log, [string]$artSource = 'Epic') {
   $steamWasRunning = [bool](Get-Process steam -ErrorAction SilentlyContinue)
   if ($steamWasRunning -and -not $Test) {
     & $log 'Closing Steam...'
@@ -149,7 +188,14 @@ function Invoke-Make($games, $accounts, [bool]$moonlight, $log) {
   $tiles = @()
   foreach ($g in $games) {
     & $log "== $($g.Name)"
-    $art = Get-Art $g (Join-Path $env:TEMP "esl-art-$([Math]::Abs($g.Name.GetHashCode()))")
+    $tmp = Join-Path $env:TEMP "esl-art-$([Math]::Abs($g.Name.GetHashCode()))"
+    $art = @{}
+    if ($artSource -eq 'Steam') {
+      if (-not $g.SteamId) { $hit = Find-SteamAppId $g.Name; if ($hit) { $g.SteamId = $hit.Id; & $log "   Steam match: $($hit.Name) (App ID $($hit.Id))$(if (-not $hit.Exact) { ' - not an exact name match, check it' })" } }
+      if ($g.SteamId) { $art = Get-SteamArt $g.SteamId $tmp } else { & $log '   not found on Steam' }
+      if (-not $art.Count) { & $log '   no Steam art, using Epic art instead' }
+    }
+    if (-not $art.Count) { $art = Get-Art $g $tmp }
     & $log ("   cover art: " + $(if ($art.Count) { ($art.Keys -join ', ') } else { 'none found' }))
     $appid = $null
     foreach ($a in $accounts) {
@@ -214,25 +260,59 @@ if ($NoGui) {
 }
 
 $f = New-Object Windows.Forms.Form
-$f.Text = 'Epic -> Steam Shortcut Maker'; $f.Size = New-Object Drawing.Size 520, 560; $f.StartPosition = 'CenterScreen'; $f.Font = New-Object Drawing.Font 'Segoe UI', 10
-$l1 = New-Object Windows.Forms.Label; $l1.Text = 'Installed Epic games:'; $l1.Location = '12,10'; $l1.AutoSize = $true
-$gl = New-Object Windows.Forms.CheckedListBox; $gl.Location = '12,34'; $gl.Size = '480,170'; $gl.CheckOnClick = $true
-foreach ($g in $games) { [void]$gl.Items.Add($g.Name) }
-$l2 = New-Object Windows.Forms.Label; $l2.Text = 'Add to these Steam accounts:'; $l2.Location = '12,212'; $l2.AutoSize = $true
-$al = New-Object Windows.Forms.CheckedListBox; $al.Location = '12,236'; $al.Size = '480,60'; $al.CheckOnClick = $true
+$f.Text = 'Epic -> Steam Shortcut Maker'; $f.Size = New-Object Drawing.Size 620, 680; $f.StartPosition = 'CenterScreen'; $f.Font = New-Object Drawing.Font 'Segoe UI', 10
+$l1 = New-Object Windows.Forms.Label; $l1.Text = 'Installed Epic games (Steam App ID is optional, used for Steam/SteamDB cover art):'; $l1.Location = '12,10'; $l1.AutoSize = $true
+$grid = New-Object Windows.Forms.DataGridView; $grid.Location = '12,34'; $grid.Size = '580,180'
+$grid.AllowUserToAddRows = $false; $grid.AllowUserToDeleteRows = $false; $grid.RowHeadersVisible = $false; $grid.SelectionMode = 'FullRowSelect'; $grid.MultiSelect = $false
+$cAdd = New-Object Windows.Forms.DataGridViewCheckBoxColumn; $cAdd.HeaderText = 'Add'; $cAdd.Width = 45
+$cName = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cName.HeaderText = 'Game'; $cName.ReadOnly = $true; $cName.AutoSizeMode = 'Fill'
+$cId = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cId.HeaderText = 'Steam App ID'; $cId.Width = 120
+[void]$grid.Columns.Add($cAdd); [void]$grid.Columns.Add($cName); [void]$grid.Columns.Add($cId)
+foreach ($g in $games) { [void]$grid.Rows.Add($false, $g.Name, '') }
+$find = New-Object Windows.Forms.Button; $find.Text = 'Find Steam IDs'; $find.Location = '12,220'; $find.Size = '180,30'
+$sdb = New-Object Windows.Forms.Button; $sdb.Text = 'Open selected on SteamDB'; $sdb.Location = '200,220'; $sdb.Size = '220,30'
+$l2 = New-Object Windows.Forms.Label; $l2.Text = 'Add to these Steam accounts:'; $l2.Location = '12,262'; $l2.AutoSize = $true
+$al = New-Object Windows.Forms.CheckedListBox; $al.Location = '12,286'; $al.Size = '580,64'; $al.CheckOnClick = $true
 for ($i = 0; $i -lt $accounts.Count; $i++) { [void]$al.Items.Add($accounts[$i].Name, [bool]$accounts[$i].Default) }
-$ml = New-Object Windows.Forms.CheckBox; $ml.Text = 'Also add a Moonlight tile (asks for admin permission)'; $ml.Location = '12,304'; $ml.AutoSize = $true
-$note = New-Object Windows.Forms.Label; $note.Text = 'Steam will be closed and reopened automatically.'; $note.Location = '12,332'; $note.AutoSize = $true; $note.ForeColor = 'DimGray'
-$go = New-Object Windows.Forms.Button; $go.Text = 'Create shortcuts'; $go.Location = '12,358'; $go.Size = '480,36'
-$out = New-Object Windows.Forms.TextBox; $out.Multiline = $true; $out.ReadOnly = $true; $out.ScrollBars = 'Vertical'; $out.Location = '12,402'; $out.Size = '480,104'
-$f.Controls.AddRange(@($l1, $gl, $l2, $al, $ml, $note, $go, $out))
+$l3 = New-Object Windows.Forms.Label; $l3.Text = 'Cover art from:'; $l3.Location = '12,360'; $l3.AutoSize = $true
+$rEpic = New-Object Windows.Forms.RadioButton; $rEpic.Text = 'Epic'; $rEpic.Location = '130,358'; $rEpic.AutoSize = $true; $rEpic.Checked = $true
+$rSteam = New-Object Windows.Forms.RadioButton; $rSteam.Text = 'Steam / SteamDB (falls back to Epic)'; $rSteam.Location = '200,358'; $rSteam.AutoSize = $true
+$ml = New-Object Windows.Forms.CheckBox; $ml.Text = 'Also add a Moonlight tile (asks for admin permission)'; $ml.Location = '12,388'; $ml.AutoSize = $true
+$note = New-Object Windows.Forms.Label; $note.Text = 'Steam will be closed and reopened automatically.'; $note.Location = '12,416'; $note.AutoSize = $true; $note.ForeColor = 'DimGray'
+$go = New-Object Windows.Forms.Button; $go.Text = 'Create shortcuts'; $go.Location = '12,442'; $go.Size = '580,36'
+$out = New-Object Windows.Forms.TextBox; $out.Multiline = $true; $out.ReadOnly = $true; $out.ScrollBars = 'Vertical'; $out.Location = '12,486'; $out.Size = '580,140'
+$f.Controls.AddRange(@($l1, $grid, $find, $sdb, $l2, $al, $l3, $rEpic, $rSteam, $ml, $note, $go, $out))
+$log = { param($m) $out.AppendText($m + "`r`n"); [Windows.Forms.Application]::DoEvents() }
+
+$find.Add_Click({
+  $find.Enabled = $false; $out.Clear()
+  for ($i = 0; $i -lt $games.Count; $i++) {
+    $hit = Find-SteamAppId $games[$i].Name
+    if ($hit) { $grid.Rows[$i].Cells[2].Value = $hit.Id; & $log "$($games[$i].Name) -> $($hit.Name) ($($hit.Id))$(if (-not $hit.Exact) { '  <- check this one' })" }
+    else { & $log "$($games[$i].Name) -> not found on Steam (leave empty to use Epic art)" }
+  }
+  $rSteam.Checked = $true; $find.Enabled = $true
+})
+$sdb.Add_Click({
+  $row = $grid.CurrentRow; if (-not $row) { return }
+  $id = [string]$row.Cells[2].Value
+  $url = if ($id -match '^\d+$') { "https://steamdb.info/app/$id/" } else { "https://steamdb.info/search/?a=app&q=" + [uri]::EscapeDataString([string]$row.Cells[1].Value) }
+  Start-Process $url
+})
 $go.Add_Click({
-  $sel = @(); foreach ($i in $gl.CheckedIndices) { $sel += $games[$i] }
+  $grid.EndEdit()
+  $sel = @()
+  for ($i = 0; $i -lt $games.Count; $i++) {
+    if ($grid.Rows[$i].Cells[0].Value -eq $true) {
+      $id = ([string]$grid.Rows[$i].Cells[2].Value).Trim()
+      $games[$i].SteamId = if ($id -match '^\d+$') { $id } else { $null }
+      $sel += $games[$i]
+    }
+  }
   $acc = @(); foreach ($i in $al.CheckedIndices) { $acc += $accounts[$i] }
-  if (-not $sel -or -not $acc) { [Windows.Forms.MessageBox]::Show('Pick at least one game and one Steam account.') | Out-Null; return }
+  if (-not $sel -or -not $acc) { [Windows.Forms.MessageBox]::Show('Tick at least one game and one Steam account.') | Out-Null; return }
   $go.Enabled = $false; $out.Clear()
-  $log = { param($m) $out.AppendText($m + "`r`n"); [Windows.Forms.Application]::DoEvents() }
-  try { Invoke-Make $sel $acc $ml.Checked $log; [Windows.Forms.MessageBox]::Show('All done!') | Out-Null }
+  try { Invoke-Make $sel $acc $ml.Checked $log $(if ($rSteam.Checked) { 'Steam' } else { 'Epic' }); [Windows.Forms.MessageBox]::Show('All done!') | Out-Null }
   catch { & $log "ERROR: $($_.Exception.Message)"; [Windows.Forms.MessageBox]::Show("Something went wrong:`n$($_.Exception.Message)") | Out-Null }
   $go.Enabled = $true
 })

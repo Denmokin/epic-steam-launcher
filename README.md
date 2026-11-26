@@ -24,7 +24,10 @@ It writes a `log.txt` next to itself, including whether each process in the chai
 
 - lists your installed Epic games (from the new Epic launcher's `installations.jsonl` + catalog cache),
 - adds the ones you tick to the Steam accounts you tick, using `EpicSteamLauncher.exe --chain`,
-- applies Epic's own cover art (portrait, wide, hero, logo),
+- applies cover art (portrait, wide, hero, logo) from **Epic** or from **Steam / SteamDB**:
+  - *Find Steam IDs* looks each game up with Steam's store search (also retries without "Complete/Deluxe/... Edition"); IDs are editable,
+  - *Open selected on SteamDB* opens the game on steamdb.info so you can check or copy the right App ID,
+  - images come straight from Steam's CDN (SteamDB blocks automated access but shows the same images); games not on Steam fall back to Epic art,
 - optionally adds a tile to **Sunshine/Moonlight** (asks for admin permission),
 - closes and reopens Steam automatically (Steam must be closed to edit `shortcuts.vdf`; a backup is kept).
 
