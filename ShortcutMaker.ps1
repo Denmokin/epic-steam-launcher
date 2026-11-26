@@ -2,7 +2,7 @@
 # Lists installed Epic games and adds them to Steam (and optionally Moonlight/Sunshine) using
 # EpicSteamLauncher.exe in --chain mode, so games get Steam's real overlay.
 # Run: powershell -ExecutionPolicy Bypass -File ShortcutMaker.ps1   (add -NoGui -Test for a dry check)
-param([switch]$NoGui, [switch]$Test)
+param([switch]$NoGui, [switch]$Test, [ValidateSet('Epic','Steam','SteamGridDB')][string]$Art = 'Epic')
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
 
@@ -167,6 +167,45 @@ function Get-SteamArt([string]$appid, $tmp) {
   $art
 }
 
+# ---------------------------------------------------------------- SteamGridDB art
+# Needs a free API key from https://www.steamgriddb.com/profile/preferences/api
+# The key is kept in steamgriddb.key next to this script (never in the repo).
+$SgdbKeyFile = Join-Path $Here 'steamgriddb.key'
+function Get-SgdbKey { if (Test-Path $SgdbKeyFile) { (Get-Content $SgdbKeyFile -Raw).Trim() } else { '' } }
+function Invoke-Sgdb([string]$path) {
+  $key = Get-SgdbKey; if (-not $key) { throw 'No SteamGridDB API key' }
+  $r = Invoke-RestMethod "https://www.steamgriddb.com/api/v2/$path" -Headers @{ Authorization = "Bearer $key" } -UseBasicParsing -TimeoutSec 20
+  if (-not $r.success) { throw "SteamGridDB: $($r.errors -join ', ')" }
+  $r.data
+}
+function Find-SgdbGame([string]$name, [string]$steamId) {
+  if ($steamId -match '^\d+$') { try { $d = Invoke-Sgdb "games/steam/$steamId"; if ($d.id) { return [pscustomobject]@{ Id = $d.id; Name = $d.name; Exact = $true } } } catch {} }
+  $clean = ($name -replace '[™®©]', '').Trim()
+  $d = @(Invoke-Sgdb ("search/autocomplete/" + [uri]::EscapeDataString($clean)))
+  if (-not $d.Count) { return $null }
+  $norm = { param($s) (($s -replace '[™®©]', '') -replace '[^a-z0-9]', '').ToLower() }
+  $exact = $d | Where-Object { (& $norm $_.name) -eq (& $norm $clean) } | Select-Object -First 1
+  $hit = if ($exact) { $exact } else { $d[0] }
+  [pscustomobject]@{ Id = $hit.id; Name = $hit.name; Exact = [bool]$exact }
+}
+function Get-SgdbArt($gameId, $tmp) {
+  New-Item -ItemType Directory -Force $tmp | Out-Null
+  $art = @{}
+  # static PNG/JPEG only (no animated or WebP, which Windows' image code can't read)
+  $kinds = @(
+    @{ k = 'tall'; q = "grids/game/${gameId}?dimensions=600x900&types=static&mimes=image/png,image/jpeg" },
+    @{ k = 'wide'; q = "grids/game/${gameId}?dimensions=920x430,460x215&types=static&mimes=image/png,image/jpeg" },
+    @{ k = 'hero'; q = "heroes/game/${gameId}?types=static&mimes=image/png,image/jpeg" },
+    @{ k = 'logo'; q = "logos/game/${gameId}?types=static&mimes=image/png" })
+  foreach ($kd in $kinds) {
+    try {
+      $u = (@(Invoke-Sgdb $kd.q) | Select-Object -First 1).url
+      if ($u) { $dst = Join-Path $tmp "sgdb-$($kd.k)$([IO.Path]::GetExtension(([uri]$u).AbsolutePath))"; Invoke-WebRequest $u -OutFile $dst -UseBasicParsing -TimeoutSec 30; $art[$kd.k] = $dst }
+    } catch {}
+  }
+  $art
+}
+
 function Install-Art($art, $gridDir, [uint32]$appid) {
   New-Item -ItemType Directory -Force $gridDir | Out-Null
   if ($art.tall) { Save-Fitted $art.tall (Join-Path $gridDir "${appid}p.jpg") 600 900 }
@@ -190,12 +229,20 @@ function Invoke-Make($games, $accounts, [bool]$moonlight, $log, [string]$artSour
     & $log "== $($g.Name)"
     $tmp = Join-Path $env:TEMP "esl-art-$([Math]::Abs($g.Name.GetHashCode()))"
     $art = @{}
-    if ($artSource -eq 'Steam') {
-      if (-not $g.SteamId) { $hit = Find-SteamAppId $g.Name; if ($hit) { $g.SteamId = $hit.Id; & $log "   Steam match: $($hit.Name) (App ID $($hit.Id))$(if (-not $hit.Exact) { ' - not an exact name match, check it' })" } }
-      if ($g.SteamId) { $art = Get-SteamArt $g.SteamId $tmp } else { & $log '   not found on Steam' }
-      if (-not $art.Count) { & $log '   no Steam art, using Epic art instead' }
+    # fill any missing picture from the next source: SteamGridDB -> Steam -> Epic
+    $addMissing = { param($more) foreach ($k in @($more.Keys)) { if (-not $art.ContainsKey($k)) { $art[$k] = $more[$k] } } }
+    if ($artSource -eq 'SteamGridDB') {
+      try {
+        $sg = Find-SgdbGame $g.Name $g.SteamId
+        if ($sg) { & $log "   SteamGridDB match: $($sg.Name)$(if (-not $sg.Exact) { ' - not an exact name match, check it' })"; & $addMissing (Get-SgdbArt $sg.Id $tmp) }
+        else { & $log '   not found on SteamGridDB' }
+      } catch { & $log "   SteamGridDB: $($_.Exception.Message)" }
     }
-    if (-not $art.Count) { $art = Get-Art $g $tmp }
+    if ($artSource -eq 'Steam' -or ($artSource -eq 'SteamGridDB' -and $art.Count -lt 4)) {
+      if (-not $g.SteamId) { $hit = Find-SteamAppId $g.Name; if ($hit) { $g.SteamId = $hit.Id; & $log "   Steam match: $($hit.Name) (App ID $($hit.Id))$(if (-not $hit.Exact) { ' - not an exact name match, check it' })" } }
+      if ($g.SteamId) { & $addMissing (Get-SteamArt $g.SteamId $tmp) } elseif ($artSource -eq 'Steam') { & $log '   not found on Steam' }
+    }
+    if ($art.Count -lt 3) { & $addMissing (Get-Art $g $tmp) }
     & $log ("   cover art: " + $(if ($art.Count) { ($art.Keys -join ', ') } else { 'none found' }))
     $appid = $null
     foreach ($a in $accounts) {
@@ -255,7 +302,7 @@ $accounts = @(Get-SteamAccounts)
 if ($NoGui) {
   $games | ForEach-Object { "GAME  $($_.Name)  [$($_.Game)]  $($_.Dir)" }
   $accounts | ForEach-Object { "STEAM $($_.Name) ($($_.Id))" }
-  if ($Test) { Invoke-Make $games @($accounts | Where-Object Default) $false { param($m) Write-Host $m } }
+  if ($Test) { Invoke-Make $games @($accounts | Where-Object Default) $false { param($m) Write-Host $m } $Art }
   return
 }
 
@@ -276,12 +323,19 @@ $al = New-Object Windows.Forms.CheckedListBox; $al.Location = '12,286'; $al.Size
 for ($i = 0; $i -lt $accounts.Count; $i++) { [void]$al.Items.Add($accounts[$i].Name, [bool]$accounts[$i].Default) }
 $l3 = New-Object Windows.Forms.Label; $l3.Text = 'Cover art from:'; $l3.Location = '12,360'; $l3.AutoSize = $true
 $rEpic = New-Object Windows.Forms.RadioButton; $rEpic.Text = 'Epic'; $rEpic.Location = '130,358'; $rEpic.AutoSize = $true; $rEpic.Checked = $true
-$rSteam = New-Object Windows.Forms.RadioButton; $rSteam.Text = 'Steam / SteamDB (falls back to Epic)'; $rSteam.Location = '200,358'; $rSteam.AutoSize = $true
-$ml = New-Object Windows.Forms.CheckBox; $ml.Text = 'Also add a Moonlight tile (asks for admin permission)'; $ml.Location = '12,388'; $ml.AutoSize = $true
-$note = New-Object Windows.Forms.Label; $note.Text = 'Steam will be closed and reopened automatically.'; $note.Location = '12,416'; $note.AutoSize = $true; $note.ForeColor = 'DimGray'
-$go = New-Object Windows.Forms.Button; $go.Text = 'Create shortcuts'; $go.Location = '12,442'; $go.Size = '580,36'
-$out = New-Object Windows.Forms.TextBox; $out.Multiline = $true; $out.ReadOnly = $true; $out.ScrollBars = 'Vertical'; $out.Location = '12,486'; $out.Size = '580,140'
-$f.Controls.AddRange(@($l1, $grid, $find, $sdb, $l2, $al, $l3, $rEpic, $rSteam, $ml, $note, $go, $out))
+$rSteam = New-Object Windows.Forms.RadioButton; $rSteam.Text = 'Steam / SteamDB'; $rSteam.Location = '200,358'; $rSteam.AutoSize = $true
+$rSgdb = New-Object Windows.Forms.RadioButton; $rSgdb.Text = 'SteamGridDB'; $rSgdb.Location = '350,358'; $rSgdb.AutoSize = $true
+$l4 = New-Object Windows.Forms.Label; $l4.Text = 'SteamGridDB API key:'; $l4.Location = '12,390'; $l4.AutoSize = $true
+$key = New-Object Windows.Forms.TextBox; $key.Location = '170,387'; $key.Size = '300,26'; $key.UseSystemPasswordChar = $true; $key.Text = (Get-SgdbKey)
+$keyLink = New-Object Windows.Forms.LinkLabel; $keyLink.Text = 'get a key'; $keyLink.Location = '480,390'; $keyLink.AutoSize = $true
+$keyLink.Add_LinkClicked({ Start-Process 'https://www.steamgriddb.com/profile/preferences/api' })
+if ($key.Text) { $rSgdb.Checked = $true }
+$ml = New-Object Windows.Forms.CheckBox; $ml.Text = 'Also add a Moonlight tile (asks for admin permission)'; $ml.Location = '12,418'; $ml.AutoSize = $true
+$note = New-Object Windows.Forms.Label; $note.Text = 'Missing pictures are filled from Steam, then Epic. Steam is closed and reopened automatically.'; $note.Location = '12,446'; $note.AutoSize = $true; $note.ForeColor = 'DimGray'
+$go = New-Object Windows.Forms.Button; $go.Text = 'Create shortcuts'; $go.Location = '12,472'; $go.Size = '580,36'
+$out = New-Object Windows.Forms.TextBox; $out.Multiline = $true; $out.ReadOnly = $true; $out.ScrollBars = 'Vertical'; $out.Location = '12,516'; $out.Size = '580,140'
+$f.Size = New-Object Drawing.Size 620, 710
+$f.Controls.AddRange(@($l1, $grid, $find, $sdb, $l2, $al, $l3, $rEpic, $rSteam, $rSgdb, $l4, $key, $keyLink, $ml, $note, $go, $out))
 $log = { param($m) $out.AppendText($m + "`r`n"); [Windows.Forms.Application]::DoEvents() }
 
 $find.Add_Click({
@@ -311,8 +365,12 @@ $go.Add_Click({
   }
   $acc = @(); foreach ($i in $al.CheckedIndices) { $acc += $accounts[$i] }
   if (-not $sel -or -not $acc) { [Windows.Forms.MessageBox]::Show('Tick at least one game and one Steam account.') | Out-Null; return }
+  $k = $key.Text.Trim()
+  if ($k -ne (Get-SgdbKey)) { if ($k) { [IO.File]::WriteAllText($SgdbKeyFile, $k) } elseif (Test-Path $SgdbKeyFile) { Remove-Item $SgdbKeyFile } }
+  if ($rSgdb.Checked -and -not $k) { [Windows.Forms.MessageBox]::Show('Paste your SteamGridDB API key first (or pick another art source).') | Out-Null; return }
   $go.Enabled = $false; $out.Clear()
-  try { Invoke-Make $sel $acc $ml.Checked $log $(if ($rSteam.Checked) { 'Steam' } else { 'Epic' }); [Windows.Forms.MessageBox]::Show('All done!') | Out-Null }
+  $src = if ($rSgdb.Checked) { 'SteamGridDB' } elseif ($rSteam.Checked) { 'Steam' } else { 'Epic' }
+  try { Invoke-Make $sel $acc $ml.Checked $log $src; [Windows.Forms.MessageBox]::Show('All done!') | Out-Null }
   catch { & $log "ERROR: $($_.Exception.Message)"; [Windows.Forms.MessageBox]::Show("Something went wrong:`n$($_.Exception.Message)") | Out-Null }
   $go.Enabled = $true
 })

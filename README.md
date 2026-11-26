@@ -28,6 +28,7 @@ It writes a `log.txt` next to itself, including whether each process in the chai
   - *Find Steam IDs* looks each game up with Steam's store search (also retries without "Complete/Deluxe/... Edition"); IDs are editable,
   - *Open selected on SteamDB* opens the game on steamdb.info so you can check or copy the right App ID,
   - images come straight from Steam's CDN (SteamDB blocks automated access but shows the same images); games not on Steam fall back to Epic art,
+- or from **SteamGridDB** (community art): paste your free API key from steamgriddb.com/profile/preferences/api into the window. It's saved in `steamgriddb.key` next to the script, which git ignores. Missing pictures are filled from Steam, then Epic.
 - optionally adds a tile to **Sunshine/Moonlight** (asks for admin permission),
 - closes and reopens Steam automatically (Steam must be closed to edit `shortcuts.vdf`; a backup is kept).
 
