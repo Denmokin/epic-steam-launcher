@@ -56,7 +56,7 @@ Turn **off** Epic's "start on boot". The launcher closes Epic before each launch
 
 ## Notes
 
-- If the Rockstar Games Launcher asks for admin rights on every launch, its install folder isn't writable by your account. Give your account Modify rights on that folder once.
+- Rockstar titles (`PlayGTAV.exe` and other "Rockstar Games Launcher Redirector" exes) re-run the Rockstar Games Launcher installer as admin on every launch, so Windows asks for permission each time. The Shortcut Maker adds `-skipInstallers` to the game's Epic launch arguments (`settings\game-settings.json`, `additionalCommands`) to stop that.
 - Started from Big Picture, the launcher brings Big Picture back when the game ends.
 
 - Steam's own overlay is loaded the same way as for any non-Steam game. Anti-cheat (e.g. BattlEye) normally accepts it, but that's up to the game.

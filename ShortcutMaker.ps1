@@ -18,8 +18,17 @@ $rsl = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Rockstar Games\Launcher' -E
 $RockstarLauncher = if ($rsl) { Join-Path $rsl 'Launcher.exe' } else { '\Rockstar Games\Launcher\Launcher.exe' }
 
 # Games whose Epic "launch exe" is only a bootstrapper: wait for the real game, close leftovers after.
+# Game = candidate real game exes (first one that exists in the game folder wins).
 $Known = @{
-  'PlayGTAV.exe' = @{ Game = 'GTA5_Enhanced.exe'; Kill = @($RockstarLauncher) }
+  'PlayGTAV.exe' = @{ Game = @('GTA5_Enhanced.exe', 'GTA5.exe'); Kill = @($RockstarLauncher) }
+  'PlayRDR2.exe' = @{ Game = @('RDR2.exe'); Kill = @($RockstarLauncher) }
+}
+# Rockstar's "Play*.exe" redirector re-runs the Rockstar Games Launcher installer (as admin, so
+# Windows asks for permission) on every launch unless it gets -skipInstallers. We put that in
+# Epic's per-game launch arguments.
+$RockstarArgs = '-skipInstallers'
+function Test-RockstarRedirector([string]$path) {
+  try { (Get-Item $path).VersionInfo.FileDescription -eq 'Rockstar Games Launcher Redirector' } catch { $false }
 }
 
 # ---------------------------------------------------------------- Epic
@@ -36,17 +45,48 @@ function Get-EpicGames {
     $name = if ($item.title) { $item.title } else { Split-Path $e.dir -Leaf }
     $exe  = Split-Path $e.launchExecutable -Leaf
     $k    = $Known[$exe]
+    $rockstar = Test-RockstarRedirector (Join-Path $e.dir $e.launchExecutable)
+    $real = $exe
+    if ($k) { $real = ($k.Game | Where-Object { Test-Path (Join-Path $e.dir $_) } | Select-Object -First 1); if (-not $real) { $real = $k.Game[0] } }
     [pscustomobject]@{
       Name  = $name
       Dir   = $e.dir
+      AppKey = "$($e.namespace):$($e.itemId):$($e.artifactId)"
       Uri   = "com.epicgames.launcher://apps/$($e.namespace)%3A$($e.itemId)%3A$($e.artifactId)?action=launch&silent=true"
-      Game  = $(if ($k) { $k.Game } else { $exe })
-      Kill  = $(if ($k) { $k.Kill } else { @() })
+      Game  = $real
+      Kill  = $(if ($k) { $k.Kill } elseif ($rockstar) { @($RockstarLauncher) } else { @() })
+      EpicArgs = $(if ($rockstar) { $RockstarArgs } else { '' })
       Icon  = Join-Path $e.dir $e.launchExecutable
       Images = $item.keyImages
       SteamId = $null
     }
   }
+}
+
+# Adds launch arguments to Epic's per-game settings (Epic must be closed, or it overwrites the file).
+function Set-EpicLaunchArgs($games, $log) {
+  $todo = @($games | Where-Object { $_.EpicArgs })
+  if (-not $todo) { return }
+  $f = "$EpicData\settings\game-settings.json"
+  $j = if (Test-Path $f) { [IO.File]::ReadAllText($f) | ConvertFrom-Json } else { [pscustomobject]@{ games = [pscustomobject]@{} } }
+  if (-not $j.games) { $j | Add-Member -NotePropertyName games -NotePropertyValue ([pscustomobject]@{}) -Force }
+  $changed = $false
+  foreach ($g in $todo) {
+    $s = $j.games.($g.AppKey)
+    if (-not $s) { $s = [pscustomobject]@{}; $j.games | Add-Member -NotePropertyName $g.AppKey -NotePropertyValue $s -Force }
+    $cur = [string]$s.additionalCommands
+    if ($s.additionalCommandsEnabled -eq $true -and $cur -match [regex]::Escape($g.EpicArgs)) { continue }
+    $new = if ($cur -match [regex]::Escape($g.EpicArgs)) { $cur } else { ("$cur $($g.EpicArgs)").Trim() }
+    $s | Add-Member -NotePropertyName additionalCommandsEnabled -NotePropertyValue $true -Force
+    $s | Add-Member -NotePropertyName additionalCommands -NotePropertyValue $new -Force
+    & $log "   Epic launch arguments for $($g.Name): $new (stops the Rockstar admin prompt)"
+    $changed = $true
+  }
+  if (-not $changed) { return }
+  if ($Test) { & $log '   [test] would update Epic game settings'; return }
+  foreach ($p in @(Get-Process EpicGamesLauncher, EpicWebHelper -ErrorAction SilentlyContinue)) { try { $p.CloseMainWindow() | Out-Null; if (-not $p.WaitForExit(5000)) { $p.Kill() } } catch {} }
+  if (Test-Path $f) { Copy-Item $f "$f.bak-$(Get-Date -f yyyyMMddHHmmss)" }
+  [IO.File]::WriteAllText($f, ($j | ConvertTo-Json -Depth 20), $enc)
 }
 
 # ---------------------------------------------------------------- Steam accounts
@@ -225,6 +265,7 @@ function Invoke-Make($games, $accounts, [bool]$moonlight, $log, [string]$artSour
     if (Get-Process steam -ErrorAction SilentlyContinue) { throw 'Steam did not close. Exit Steam from the tray icon and try again.' }
   }
   $tiles = @()
+  Set-EpicLaunchArgs $games $log
   foreach ($g in $games) {
     & $log "== $($g.Name)"
     $tmp = Join-Path $env:TEMP "esl-art-$([Math]::Abs($g.Name.GetHashCode()))"
