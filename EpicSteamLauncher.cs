@@ -10,7 +10,10 @@
 //
 // Usage (Steam launch options):
 //   --uri "<com.epicgames.launcher://...>" --game GTA5_Enhanced [--timeout 300] [--grace 8]
-//   [--kill-path "Rockstar Games\Launcher"] [--dry-run]
+//   [--kill-path "Rockstar Games\Launcher"] [--chain] [--hide-launchers [--hide-for 90]] [--dry-run]
+//   --hide-launchers (chain mode): hides Epic/publisher launcher windows while the game loads; if the
+//   game hasn't started after --hide-for seconds they are shown again (sign-in or update may need input).
+//   Launched from Big Picture -> Big Picture is brought back when the game ends.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -54,6 +57,72 @@ static class EpicSteamLauncher
         try { return Process.GetProcessesByName(name); } catch { return new Process[0]; }
     }
 
+    // ---- hiding launcher windows (console-like: only Big Picture and the game are ever visible) ----
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct PROCESSENTRY32
+    {
+        public uint dwSize, cntUsage, th32ProcessID; public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID, cntThreads, th32ParentProcessID; public int pcPriClassBase; public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32First(IntPtr snap, ref PROCESSENTRY32 e);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32Next(IntPtr snap, ref PROCESSENTRY32 e);
+    delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int cmd);
+
+    // pids of everything started (directly or indirectly) by root, except the game and anti-cheat
+    static HashSet<uint> Descendants(int root, string game)
+    {
+        var parent = new Dictionary<uint, uint>(); var name = new Dictionary<uint, string>();
+        IntPtr snap = CreateToolhelp32Snapshot(2 /* TH32CS_SNAPPROCESS */, 0);
+        if (snap == IntPtr.Zero || snap == new IntPtr(-1)) return new HashSet<uint>();
+        try
+        {
+            var e = new PROCESSENTRY32 { dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32)) };
+            for (bool ok = Process32First(snap, ref e); ok; ok = Process32Next(snap, ref e))
+            { parent[e.th32ProcessID] = e.th32ParentProcessID; name[e.th32ProcessID] = e.szExeFile ?? ""; }
+        }
+        finally { CloseHandle(snap); }
+        var set = new HashSet<uint> { (uint)root };
+        for (bool grew = true; grew; )
+        {
+            grew = false;
+            foreach (var kv in parent)
+                if (!set.Contains(kv.Key) && set.Contains(kv.Value) && kv.Key != kv.Value) { set.Add(kv.Key); grew = true; }
+        }
+        set.RemoveWhere(pid =>
+        {
+            string n = Path.GetFileNameWithoutExtension(name.ContainsKey(pid) ? name[pid] : "");
+            return n.Equals(game, StringComparison.OrdinalIgnoreCase) || n.EndsWith("_BE", StringComparison.OrdinalIgnoreCase);
+        });
+        return set;
+    }
+
+    static readonly List<IntPtr> hidden = new List<IntPtr>();
+    static void HideWindowsOf(HashSet<uint> pids)
+    {
+        EnumWindows((hwnd, l) =>
+        {
+            uint pid; GetWindowThreadProcessId(hwnd, out pid);
+            if (pids.Contains(pid) && IsWindowVisible(hwnd))
+            {
+                ShowWindow(hwnd, 0 /* SW_HIDE */);
+                if (!hidden.Contains(hwnd)) { hidden.Add(hwnd); Log("hid a launcher window (pid " + pid + ")"); }
+            }
+            return true;
+        }, IntPtr.Zero);
+    }
+    static void UnhideAll()
+    {
+        foreach (var h in hidden) ShowWindow(h, 5 /* SW_SHOW */);
+        if (hidden.Count > 0) Log("showed " + hidden.Count + " launcher window(s) again");
+        hidden.Clear();
+    }
+
     static int Main(string[] args)
     {
         // log next to the exe (not under AppData, which some apps virtualize per-package)
@@ -62,7 +131,7 @@ static class EpicSteamLauncher
         try { if (File.Exists(logPath) && new FileInfo(logPath).Length > 512 * 1024) File.Delete(logPath); } catch { }
 
         string uri = null, game = null, epicExe = null; var killPaths = new List<string>();
-        int timeout = 300, grace = 8; bool dry = false, chain = false;
+        int timeout = 300, grace = 8, hideFor = 90; bool dry = false, chain = false, hide = false;
         for (int i = 0; i < args.Length; i++)
         {
             string a = args[i].ToLowerInvariant();
@@ -74,6 +143,8 @@ static class EpicSteamLauncher
             else if (a == "--kill-path" && next != null) { killPaths.Add(next); i++; }
             else if (a == "--epic-exe" && next != null) { epicExe = next; i++; }
             else if (a == "--chain") chain = true;
+            else if (a == "--hide-launchers") hide = true;
+            else if (a == "--hide-for" && next != null) { int.TryParse(next, out hideFor); i++; }
             else if (a == "--dry-run") dry = true;
         }
         if (game != null && game.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) game = game.Substring(0, game.Length - 4);
@@ -125,15 +196,24 @@ static class EpicSteamLauncher
         else Log("game already running; attaching");
 
         // 2. wait for the game to appear
+        // Big Picture started us -> come back to it at the end
+        bool fromBigPicture = Environment.GetEnvironmentVariable("SteamGamepadUI") != null || Environment.GetEnvironmentVariable("SteamTenfoot") != null;
+        hide = hide && chain && epic != null && !dry;
         var sw = Stopwatch.StartNew();
         while (Find(game).Length == 0)
         {
-            if (sw.Elapsed.TotalSeconds > timeout) { Log("game did not start within " + timeout + "s; exiting"); return 1; }
-            Thread.Sleep(1000);
+            if (sw.Elapsed.TotalSeconds > timeout) { UnhideAll(); Log("game did not start within " + timeout + "s; exiting"); return 1; }
+            if (hide)
+            {
+                if (sw.Elapsed.TotalSeconds < hideFor) { try { HideWindowsOf(Descendants(epic.Id, game)); } catch { } }
+                else { Log("game not started after " + hideFor + "s; showing launcher windows (sign-in or update may need you)"); UnhideAll(); hide = false; }
+            }
+            Thread.Sleep(hide ? 250 : 1000);
         }
         Log("game running after " + (int)sw.Elapsed.TotalSeconds + "s");
+        if (hide) { var t = Stopwatch.StartNew(); while (t.Elapsed.TotalSeconds < 10) { try { HideWindowsOf(Descendants(epic.Id, game)); } catch { } Thread.Sleep(500); } }
         // report which processes in the chain carry Steam's overlay (the game itself may refuse inspection under anti-cheat)
-        Thread.Sleep(15000);
+        Thread.Sleep(hide ? 5000 : 15000);
         foreach (var name in new[] { "EpicGamesLauncher", "PlayGTAV", "Launcher", game })
             foreach (var p in Find(name))
                 Log("overlay check " + name + " pid " + p.Id + ": " + OverlayState(p));
@@ -154,6 +234,10 @@ static class EpicSteamLauncher
         if (chain)
             CloseMatching(n => n.EndsWith("\\EpicGamesLauncher.exe", StringComparison.OrdinalIgnoreCase)
                             || n.EndsWith("\\EpicWebHelper.exe", StringComparison.OrdinalIgnoreCase), "after game", dry);
+        if (fromBigPicture && !dry)
+        {
+            try { Process.Start(new ProcessStartInfo("steam://open/bigpicture") { UseShellExecute = true }); Log("back to Big Picture"); } catch { }
+        }
         Log("done");
         return 0;
     }

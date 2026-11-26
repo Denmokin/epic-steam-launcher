@@ -46,6 +46,7 @@ Turn **off** Epic's "start on boot". The launcher closes Epic before each launch
 | `--uri <link>` | Epic launch link: `com.epicgames.launcher://apps/<namespace>%3A<itemId>%3A<appName>?action=launch&silent=true` |
 | `--game <exe>` | The real game process to wait for (e.g. `GTA5_Enhanced.exe`) |
 | `--chain` | Start Epic as our child so the game gets the Steam overlay |
+| `--hide-launchers` | (chain) Hide Epic/publisher launcher windows while the game loads; shown again if the game hasn't started after `--hide-for` seconds (default 90) |
 | `--kill-path <path>` | Close processes whose path contains this after the game (repeatable) |
 | `--timeout <s>` | Give up if the game hasn't started (default 300) |
 | `--grace <s>` | Wait after the game exits in case it restarts (default 8) |
@@ -53,6 +54,9 @@ Turn **off** Epic's "start on boot". The launcher closes Epic before each launch
 | `--dry-run` | Log what would happen, change nothing |
 
 ## Notes
+
+- If the Rockstar Games Launcher asks for admin rights on every launch, its install folder isn't writable by your account. Give your account Modify rights on that folder once.
+- Started from Big Picture, the launcher brings Big Picture back when the game ends.
 
 - Steam's own overlay is loaded the same way as for any non-Steam game. Anti-cheat (e.g. BattlEye) normally accepts it, but that's up to the game.
 - Steam shortcut "Start in" must be **unquoted** with a trailing backslash, or Windows refuses to start it (error 267).

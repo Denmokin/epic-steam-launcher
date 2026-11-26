@@ -103,7 +103,7 @@ function Save-Shortcuts($path, $list) {
 }
 
 function New-ShortcutEntry($g, [uint32]$appid) {
-  $opts = "--chain --uri `"$($g.Uri)`" --game $($g.Game)" + (($g.Kill | ForEach-Object { " --kill-path `"$_`"" }) -join '')
+  $opts = "--chain --hide-launchers --uri `"$($g.Uri)`" --game $($g.Game)" + (($g.Kill | ForEach-Object { " --kill-path `"$_`"" }) -join '')
   [ordered]@{
     appid = (ToSigned $appid); AppName = $g.Name; Exe = "`"$Launcher`""; StartDir = "$Here\"   # unquoted + trailing \ (quotes break CreateProcess)
     icon = $g.Icon; ShortcutPath = ''; LaunchOptions = $opts; IsHidden = 0; AllowDesktopConfig = 1; AllowOverlay = 1
