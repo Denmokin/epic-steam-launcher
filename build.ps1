@@ -1,4 +1,5 @@
-﻿# Builds EpicSteamLauncher.exe with the C# compiler that ships with Windows (.NET Framework 4).
+﻿# Builds EpicSteamLauncher.exe (the game launcher) and EpicToSteam.exe (opens the app)
+# with the C# compiler that ships with Windows (.NET Framework 4). Nothing to install.
 # Usage: powershell -ExecutionPolicy Bypass -File build.ps1
 $ErrorActionPreference = 'Stop'
 $fw  = "$env:windir\Microsoft.NET\Framework64\v4.0.30319"
@@ -7,9 +8,12 @@ if (-not (Test-Path $csc)) { throw ".NET Framework 4 compiler not found at $csc"
 $wpf = "$fw\WPF"
 Push-Location $PSScriptRoot
 try {
-  & $csc /nologo /target:winexe /platform:x64 /optimize+ /out:EpicSteamLauncher.exe `
+  if (-not (Test-Path icon.ico)) { & powershell -NoProfile -ExecutionPolicy Bypass -File .\make-icon.ps1 }
+  & $csc /nologo /target:winexe /platform:x64 /optimize+ /win32icon:icon.ico /out:EpicSteamLauncher.exe `
     "/r:$wpf\PresentationFramework.dll" "/r:$wpf\PresentationCore.dll" "/r:$wpf\WindowsBase.dll" "/r:$fw\System.Xaml.dll" `
     EpicSteamLauncher.cs Loader.cs
-  if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
-  Write-Host 'Built EpicSteamLauncher.exe'
+  if ($LASTEXITCODE -ne 0) { throw 'Build of EpicSteamLauncher.exe failed' }
+  & $csc /nologo /target:winexe /platform:anycpu /optimize+ /win32icon:icon.ico /out:EpicToSteam.exe /r:System.Windows.Forms.dll EpicToSteam.cs
+  if ($LASTEXITCODE -ne 0) { throw 'Build of EpicToSteam.exe failed' }
+  Write-Host 'Built EpicSteamLauncher.exe and EpicToSteam.exe'
 } finally { Pop-Location }

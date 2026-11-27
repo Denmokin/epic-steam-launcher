@@ -4,3 +4,5 @@ log.txt
 steamgriddb.key
 art/
 loadtimes.txt
+dist/
+*.zip

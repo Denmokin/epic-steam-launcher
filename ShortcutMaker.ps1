@@ -2,7 +2,7 @@
 # Lists installed Epic games and adds them to Steam (and optionally Moonlight/Sunshine) using
 # EpicSteamLauncher.exe in --chain mode, so games get Steam's real overlay.
 # Run: powershell -ExecutionPolicy Bypass -File ShortcutMaker.ps1   (add -NoGui -Test for a dry check)
-param([switch]$NoGui, [switch]$Test, [ValidateSet('Epic','Steam','SteamGridDB')][string]$Art = 'Epic')
+param([switch]$NoGui, [switch]$Test, [ValidateSet('Epic','Steam','SteamGridDB')][string]$Art = 'Epic', [string]$Snapshot)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
 
@@ -268,10 +268,11 @@ function Save-Backgrounds($g, [uint32]$appid, $log) {
       @($d.$sid.data.screenshots) | Select-Object -First 6 | ForEach-Object { if ($_.path_full) { $urls.Add(($_.path_full -replace '\?.*$', '')) } }
     } catch {}
   }
-  foreach ($t in 'DieselStoreFrontWide', 'OfferImageWide', 'DieselGameBox') {
+  # Epic's wide images often have the logo printed on them, so only use them when there's little else
+  if ($urls.Count -lt 3) { foreach ($t in 'DieselStoreFrontWide', 'OfferImageWide', 'DieselGameBox') {
     $u = ($g.Images | Where-Object { $_.type -eq $t } | Select-Object -First 1).url
     if ($u -and -not $urls.Contains($u)) { $urls.Add($u) }
-  }
+  } }
   $n = 0
   foreach ($u in $urls) {
     $ext = [IO.Path]::GetExtension(([uri]$u).AbsolutePath).ToLower(); if ($ext -notin '.jpg', '.jpeg', '.png') { $ext = '.jpg' }
@@ -393,72 +394,475 @@ if ($NoGui) {
   return
 }
 
-$f = New-Object Windows.Forms.Form
-$f.Text = 'Epic -> Steam Shortcut Maker'; $f.Size = New-Object Drawing.Size 620, 680; $f.StartPosition = 'CenterScreen'; $f.Font = New-Object Drawing.Font 'Segoe UI', 10
-$l1 = New-Object Windows.Forms.Label; $l1.Text = 'Installed Epic games (Steam App ID is optional, used for Steam/SteamDB cover art):'; $l1.Location = '12,10'; $l1.AutoSize = $true
-$grid = New-Object Windows.Forms.DataGridView; $grid.Location = '12,34'; $grid.Size = '580,180'
-$grid.AllowUserToAddRows = $false; $grid.AllowUserToDeleteRows = $false; $grid.RowHeadersVisible = $false; $grid.SelectionMode = 'FullRowSelect'; $grid.MultiSelect = $false
-$cAdd = New-Object Windows.Forms.DataGridViewCheckBoxColumn; $cAdd.HeaderText = 'Add'; $cAdd.Width = 45
-$cName = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cName.HeaderText = 'Game'; $cName.ReadOnly = $true; $cName.AutoSizeMode = 'Fill'
-$cId = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cId.HeaderText = 'Steam App ID'; $cId.Width = 120
-[void]$grid.Columns.Add($cAdd); [void]$grid.Columns.Add($cName); [void]$grid.Columns.Add($cId)
-foreach ($g in $games) { [void]$grid.Rows.Add($false, $g.Name, '') }
-$find = New-Object Windows.Forms.Button; $find.Text = 'Find Steam IDs'; $find.Location = '12,220'; $find.Size = '180,30'
-$sdb = New-Object Windows.Forms.Button; $sdb.Text = 'Open selected on SteamDB'; $sdb.Location = '200,220'; $sdb.Size = '220,30'
-$l2 = New-Object Windows.Forms.Label; $l2.Text = 'Add to these Steam accounts:'; $l2.Location = '12,262'; $l2.AutoSize = $true
-$al = New-Object Windows.Forms.CheckedListBox; $al.Location = '12,286'; $al.Size = '580,64'; $al.CheckOnClick = $true
-for ($i = 0; $i -lt $accounts.Count; $i++) { [void]$al.Items.Add($accounts[$i].Name, [bool]$accounts[$i].Default) }
-$l3 = New-Object Windows.Forms.Label; $l3.Text = 'Cover art from:'; $l3.Location = '12,360'; $l3.AutoSize = $true
-$rEpic = New-Object Windows.Forms.RadioButton; $rEpic.Text = 'Epic'; $rEpic.Location = '130,358'; $rEpic.AutoSize = $true; $rEpic.Checked = $true
-$rSteam = New-Object Windows.Forms.RadioButton; $rSteam.Text = 'Steam / SteamDB'; $rSteam.Location = '200,358'; $rSteam.AutoSize = $true
-$rSgdb = New-Object Windows.Forms.RadioButton; $rSgdb.Text = 'SteamGridDB'; $rSgdb.Location = '350,358'; $rSgdb.AutoSize = $true
-$l4 = New-Object Windows.Forms.Label; $l4.Text = 'SteamGridDB API key:'; $l4.Location = '12,390'; $l4.AutoSize = $true
-$key = New-Object Windows.Forms.TextBox; $key.Location = '170,387'; $key.Size = '300,26'; $key.UseSystemPasswordChar = $true; $key.Text = (Get-SgdbKey)
-$keyLink = New-Object Windows.Forms.LinkLabel; $keyLink.Text = 'get a key'; $keyLink.Location = '480,390'; $keyLink.AutoSize = $true
-$keyLink.Add_LinkClicked({ Start-Process 'https://www.steamgriddb.com/profile/preferences/api' })
-if ($key.Text) { $rSgdb.Checked = $true }
-$ml = New-Object Windows.Forms.CheckBox; $ml.Text = 'Also add a Moonlight tile (asks for admin permission)'; $ml.Location = '12,418'; $ml.AutoSize = $true
-$note = New-Object Windows.Forms.Label; $note.Text = 'Missing pictures are filled from Steam, then Epic. Steam is closed and reopened automatically.'; $note.Location = '12,446'; $note.AutoSize = $true; $note.ForeColor = 'DimGray'
-$go = New-Object Windows.Forms.Button; $go.Text = 'Create shortcuts'; $go.Location = '12,472'; $go.Size = '580,36'
-$out = New-Object Windows.Forms.TextBox; $out.Multiline = $true; $out.ReadOnly = $true; $out.ScrollBars = 'Vertical'; $out.Location = '12,516'; $out.Size = '580,140'
-$f.Size = New-Object Drawing.Size 620, 710
-$f.Controls.AddRange(@($l1, $grid, $find, $sdb, $l2, $al, $l3, $rEpic, $rSteam, $rSgdb, $l4, $key, $keyLink, $ml, $note, $go, $out))
-$log = { param($m) $out.AppendText($m + "`r`n"); [Windows.Forms.Application]::DoEvents() }
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-$find.Add_Click({
-  $find.Enabled = $false; $out.Clear()
-  for ($i = 0; $i -lt $games.Count; $i++) {
-    $hit = Find-SteamAppId $games[$i].Name
-    if ($hit) { $grid.Rows[$i].Cells[2].Value = $hit.Id; & $log "$($games[$i].Name) -> $($hit.Name) ($($hit.Id))$(if (-not $hit.Exact) { '  <- check this one' })" }
-    else { & $log "$($games[$i].Name) -> not found on Steam (leave empty to use Epic art)" }
+$xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Epic to Steam" Width="1180" Height="880" WindowStartupLocation="CenterScreen"
+        WindowStyle="None" ResizeMode="CanMinimize" Background="#0E1116" BorderBrush="#263040" BorderThickness="1"
+        FontFamily="Segoe UI Variable Display, Segoe UI" Foreground="#E8EDF3" UseLayoutRounding="True">
+  <Window.Resources>
+    <SolidColorBrush x:Key="Accent" Color="#1A9FFF"/>
+    <SolidColorBrush x:Key="Muted" Color="#8A96A8"/>
+
+    <Style TargetType="ScrollBar">
+      <Setter Property="Width" Value="8"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent">
+              <Track x:Name="PART_Track" IsDirectionReversed="True">
+                <Track.Thumb>
+                  <Thumb>
+                    <Thumb.Template>
+                      <ControlTemplate TargetType="Thumb"><Border CornerRadius="4" Background="#334055"/></ControlTemplate>
+                    </Thumb.Template>
+                  </Thumb>
+                </Track.Thumb>
+              </Track>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Primary" TargetType="Button">
+      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="FontSize" Value="15"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Height" Value="50"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="B" CornerRadius="12">
+              <Border.Background>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                  <GradientStop Color="#2D6BF9" Offset="0"/>
+                  <GradientStop Color="#19B5FF" Offset="1"/>
+                </LinearGradientBrush>
+              </Border.Background>
+              <Border.Effect><DropShadowEffect Color="#1A9FFF" BlurRadius="22" ShadowDepth="0" Opacity="0.45"/></Border.Effect>
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="B" Property="Opacity" Value="0.88"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="B" Property="Opacity" Value="0.75"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="B" Property="Opacity" Value="0.35"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Secondary" TargetType="Button">
+      <Setter Property="Foreground" Value="#E8EDF3"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Height" Value="40"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="B" CornerRadius="10" Background="#1E2530" BorderBrush="#2E3948" BorderThickness="1">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="B" Property="Background" Value="#263040"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="B" Property="Opacity" Value="0.4"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Chrome" TargetType="Button">
+      <Setter Property="Foreground" Value="#8A96A8"/>
+      <Setter Property="Width" Value="46"/>
+      <Setter Property="Height" Value="34"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="B" Background="Transparent" CornerRadius="8">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="B" Property="Background" Value="#222A36"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Switch" TargetType="CheckBox">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Foreground" Value="#E8EDF3"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <Border x:Name="Row" Background="#1A2029" CornerRadius="10" Padding="14,10" Margin="0,0,0,8">
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <ContentPresenter VerticalAlignment="Center"/>
+                <Border x:Name="Track" Grid.Column="1" Width="42" Height="24" CornerRadius="12" Background="#2A3342" VerticalAlignment="Center">
+                  <Border x:Name="Knob" Width="18" Height="18" CornerRadius="9" Background="#8A96A8" HorizontalAlignment="Left" Margin="3,0"/>
+                </Border>
+              </Grid>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Row" Property="Background" Value="#202835"/></Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Track" Property="Background" Value="#1A9FFF"/>
+                <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right"/>
+                <Setter TargetName="Knob" Property="Background" Value="White"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Seg" TargetType="RadioButton">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Foreground" Value="#8A96A8"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <Border x:Name="B" CornerRadius="8" Padding="6,8" Background="Transparent">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="B" Property="Background" Value="#1E2530"/></Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="B" Property="Background" Value="#1A9FFF"/>
+                <Setter Property="Foreground" Value="White"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Field" TargetType="Control">
+      <Setter Property="Foreground" Value="#E8EDF3"/>
+      <Setter Property="FontSize" Value="13"/>
+    </Style>
+    <ControlTemplate x:Key="FieldTemplate" TargetType="Control">
+      <Border x:Name="B" Background="#0E1116" BorderBrush="#2E3948" BorderThickness="1" CornerRadius="8" Padding="8,6">
+        <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center"/>
+      </Border>
+      <ControlTemplate.Triggers>
+        <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="B" Property="BorderBrush" Value="#1A9FFF"/></Trigger>
+      </ControlTemplate.Triggers>
+    </ControlTemplate>
+
+    <Style x:Key="Section" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="Foreground" Value="#6F7C8F"/>
+      <Setter Property="Margin" Value="2,16,0,8"/>
+    </Style>
+  </Window.Resources>
+
+  <Grid>
+    <Grid.RowDefinitions><RowDefinition Height="84"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="400"/></Grid.ColumnDefinitions>
+
+    <!-- header -->
+    <Grid x:Name="Header" Grid.ColumnSpan="2" Background="Transparent">
+      <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="28,0,0,0">
+        <Border Width="44" Height="44" CornerRadius="12" Margin="0,0,14,0">
+          <Border.Background>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+              <GradientStop Color="#2D6BF9" Offset="0"/><GradientStop Color="#19B5FF" Offset="1"/>
+            </LinearGradientBrush>
+          </Border.Background>
+          <TextBlock Text="&#xE7FC;" FontFamily="Segoe MDL2 Assets" FontSize="22" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </Border>
+        <StackPanel VerticalAlignment="Center">
+          <TextBlock Text="Epic to Steam" FontSize="22" FontWeight="SemiBold"/>
+          <TextBlock Text="Your Epic games in Steam, with the Steam overlay, controller support and a loading screen" FontSize="12.5" Foreground="{StaticResource Muted}" Margin="0,2,0,0"/>
+        </StackPanel>
+      </StackPanel>
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,10,10,0">
+        <Button x:Name="MinBtn" Style="{StaticResource Chrome}" Content="&#xE921;" FontFamily="Segoe MDL2 Assets" FontSize="10"/>
+        <Button x:Name="CloseBtn" Style="{StaticResource Chrome}" Content="&#xE8BB;" FontFamily="Segoe MDL2 Assets" FontSize="10"/>
+      </StackPanel>
+    </Grid>
+
+    <!-- games -->
+    <Grid Grid.Row="1" Margin="28,0,12,24">
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+      <Grid Margin="0,0,16,14">
+        <StackPanel Orientation="Horizontal">
+          <TextBlock Text="Installed Epic games" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Bottom"/>
+          <TextBlock x:Name="GameCount" FontSize="13" Foreground="{StaticResource Muted}" Margin="10,0,0,1" VerticalAlignment="Bottom"/>
+        </StackPanel>
+        <TextBlock x:Name="SelectAll" Text="Select all" Foreground="{StaticResource Accent}" FontSize="13" Cursor="Hand" HorizontalAlignment="Right" VerticalAlignment="Bottom"/>
+      </Grid>
+      <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <WrapPanel x:Name="Cards"/>
+      </ScrollViewer>
+      <TextBlock x:Name="Empty" Grid.Row="1" Visibility="Collapsed" Foreground="{StaticResource Muted}" FontSize="14"
+                 Text="No installed Epic games found." HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    </Grid>
+
+    <!-- side panel -->
+    <Border Grid.Row="1" Grid.Column="1" Background="#151A21" CornerRadius="16" Margin="0,0,24,24" Padding="22,6,22,22">
+      <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel>
+          <TextBlock Text="STEAM ACCOUNTS" Style="{StaticResource Section}"/>
+          <StackPanel x:Name="Accounts"/>
+
+          <TextBlock Text="COVER ART AND LOADING SCREEN PHOTOS" Style="{StaticResource Section}"/>
+          <Border Background="#0E1116" CornerRadius="10" Padding="4">
+            <UniformGrid Columns="3">
+              <RadioButton x:Name="ArtEpic" Style="{StaticResource Seg}" GroupName="Art" Content="Epic"/>
+              <RadioButton x:Name="ArtSteam" Style="{StaticResource Seg}" GroupName="Art" Content="Steam"/>
+              <RadioButton x:Name="ArtSgdb" Style="{StaticResource Seg}" GroupName="Art" Content="SteamGridDB"/>
+            </UniformGrid>
+          </Border>
+          <Grid x:Name="KeyRow" Margin="0,10,0,0">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <PasswordBox x:Name="KeyBox" CaretBrush="#E8EDF3" Style="{StaticResource Field}" Template="{StaticResource FieldTemplate}" ToolTip="SteamGridDB API key"/>
+            <TextBlock x:Name="KeyLink" Grid.Column="1" Text="Get a key" Foreground="{StaticResource Accent}" FontSize="12.5" Cursor="Hand" VerticalAlignment="Center" Margin="12,0,2,0"/>
+          </Grid>
+          <TextBlock x:Name="ArtHint" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="2,8,0,0"/>
+
+          <TextBlock Text="OPTIONS" Style="{StaticResource Section}"/>
+          <CheckBox x:Name="Moonlight" Style="{StaticResource Switch}">
+            <StackPanel>
+              <TextBlock Text="Moonlight tile" FontSize="14"/>
+              <TextBlock Text="Also show the game in Moonlight (asks for admin once)" FontSize="11.5" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/>
+            </StackPanel>
+          </CheckBox>
+
+          <Grid Margin="0,10,0,0">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Button x:Name="FindBtn" Style="{StaticResource Secondary}" Content="Find Steam IDs"/>
+            <Button x:Name="DbBtn" Grid.Column="2" Style="{StaticResource Secondary}" Content="Open SteamDB"/>
+          </Grid>
+          <Button x:Name="GoBtn" Style="{StaticResource Primary}" Margin="0,14,0,0" Content="Select games to add"/>
+          <TextBlock Text="Steam closes and reopens by itself while games are added." FontSize="11.5" Foreground="{StaticResource Muted}" HorizontalAlignment="Center" Margin="0,8,0,0"/>
+          <Border x:Name="Banner" CornerRadius="10" Padding="12,10" Margin="0,12,0,0" Visibility="Collapsed" BorderThickness="1">
+            <TextBlock x:Name="BannerText" FontSize="13" TextWrapping="Wrap"/>
+          </Border>
+        </StackPanel>
+
+        <Grid Grid.Row="1" Margin="0,4,0,0">
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <TextBlock Text="ACTIVITY" Style="{StaticResource Section}"/>
+          <Border Grid.Row="1" Background="#0B0E12" CornerRadius="10" Padding="10,8" MinHeight="90">
+            <TextBox x:Name="Log" IsReadOnly="True" Background="Transparent" BorderThickness="0" Foreground="#9FB0C4"
+                     FontFamily="Cascadia Mono, Consolas" FontSize="11.5" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+          </Border>
+        </Grid>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>
+'@
+
+$cardXaml = @'
+<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="180" Margin="0,0,16,16" CornerRadius="14" Background="#1A2029" BorderThickness="2" BorderBrush="Transparent">
+  <StackPanel>
+    <Grid x:Name="Pick" Height="240" Cursor="Hand" Background="Transparent">
+      <Border CornerRadius="12,12,0,0" Background="#222A36">
+        <TextBlock x:Name="Initials" FontSize="40" FontWeight="Bold" Foreground="#3A4658" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      </Border>
+      <Border x:Name="Cover" CornerRadius="12,12,0,0"/>
+      <Border x:Name="Shade" CornerRadius="12,12,0,0" Background="#661A9FFF" Visibility="Collapsed"/>
+      <Border x:Name="InSteam" CornerRadius="6" Background="#CC0E1116" Padding="7,3" Margin="10" HorizontalAlignment="Left" VerticalAlignment="Top" Visibility="Collapsed">
+        <TextBlock Text="IN STEAM" FontSize="10" FontWeight="Bold" Foreground="#7FD1FF"/>
+      </Border>
+      <Border x:Name="Check" Width="30" Height="30" CornerRadius="15" Background="#1A9FFF" Margin="10" HorizontalAlignment="Right" VerticalAlignment="Top" Visibility="Collapsed">
+        <Border.Effect><DropShadowEffect BlurRadius="10" ShadowDepth="0" Opacity="0.6"/></Border.Effect>
+        <TextBlock Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" FontSize="14" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      </Border>
+    </Grid>
+    <TextBlock x:Name="Title" Margin="12,10,12,0" FontSize="13.5" FontWeight="SemiBold" Foreground="#E8EDF3" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" Height="38"/>
+    <Grid Margin="12,6,12,12">
+      <Border Background="#0E1116" CornerRadius="7" BorderBrush="#2E3948" BorderThickness="1" Padding="7,4">
+        <Grid>
+          <TextBlock x:Name="IdHint" Text="Steam App ID" FontSize="11.5" Foreground="#5B677A" IsHitTestVisible="False" VerticalAlignment="Center"/>
+          <TextBox x:Name="SteamId" Background="Transparent" BorderThickness="0" Foreground="#E8EDF3" CaretBrush="#E8EDF3" FontSize="11.5" Padding="0"/>
+        </Grid>
+      </Border>
+    </Grid>
+  </StackPanel>
+</Border>
+'@
+
+$win = [Windows.Markup.XamlReader]::Parse($xaml)
+$iconPath = Join-Path $Here 'icon.ico'; if (Test-Path $iconPath) { try { $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create([uri]$iconPath) } catch {} }
+$ui = @{}
+foreach ($n in 'Header','MinBtn','CloseBtn','Cards','Empty','GameCount','SelectAll','Accounts','ArtEpic','ArtSteam','ArtSgdb','KeyRow','KeyBox','KeyLink','ArtHint','Moonlight','FindBtn','DbBtn','GoBtn','Banner','BannerText','Log') { $ui[$n] = $win.FindName($n) }
+
+$ui.Header.Add_MouseLeftButtonDown({ $win.DragMove() })
+$ui.MinBtn.Add_Click({ $win.WindowState = 'Minimized' })
+$ui.CloseBtn.Add_Click({ $win.Close() })
+
+$log = {
+  param($m)
+  $ui.Log.AppendText($m + "`r`n"); $ui.Log.ScrollToEnd()
+  $win.Dispatcher.Invoke([Action]{}, [Windows.Threading.DispatcherPriority]::Background)   # let the window repaint
+}
+function Show-Banner([string]$text, [bool]$ok) {
+  $bc = New-Object Windows.Media.BrushConverter
+  $ui.Banner.Background = $bc.ConvertFrom($(if ($ok) { '#14301F' } else { '#3A1518' }))
+  $ui.Banner.BorderBrush = $bc.ConvertFrom($(if ($ok) { '#2F9E5B' } else { '#E5484D' }))
+  $ui.BannerText.Foreground = $bc.ConvertFrom($(if ($ok) { '#8FE3B0' } else { '#FFB4B6' }))
+  $ui.BannerText.Text = $text; $ui.Banner.Visibility = 'Visible'
+}
+
+# ---- accounts ----
+$accSwitches = @()
+foreach ($a in $accounts) {
+  $cb = New-Object Windows.Controls.CheckBox
+  $cb.Style = $win.FindResource('Switch')
+  $sp = New-Object Windows.Controls.StackPanel
+  $t1 = New-Object Windows.Controls.TextBlock; $t1.Text = ($a.Name -replace '\s*\(id \d+\)$', ''); $t1.FontSize = 14
+  $t2 = New-Object Windows.Controls.TextBlock; $t2.Text = "Steam ID $($a.Id)"; $t2.FontSize = 11.5; $t2.Foreground = $win.FindResource('Muted')
+  [void]$sp.Children.Add($t1); [void]$sp.Children.Add($t2)
+  $cb.Content = $sp; $cb.IsChecked = [bool]$a.Default
+  [void]$ui.Accounts.Children.Add($cb); $accSwitches += $cb
+}
+
+# ---- which games are already in Steam (any ticked-by-default account) ----
+function Get-InSteam {
+  $names = @{}
+  foreach ($a in $accounts) {
+    try { foreach ($s in (Read-Shortcuts "$Steam\userdata\$($a.Id)\config\shortcuts.vdf")) { $nm = $s['AppName']; if (-not $nm) { $nm = $s['appname'] }; if ($nm) { $names[$nm] = $true } } } catch {}
   }
-  $rSteam.Checked = $true; $find.Enabled = $true
+  $names
+}
+
+# ---- game cards ----
+$cards = New-Object System.Collections.ArrayList
+function Update-Go {
+  $c = @($cards | Where-Object { $_.Selected }).Count
+  $ui.GoBtn.IsEnabled = $c -gt 0
+  $ui.GoBtn.Content = if ($c -eq 0) { 'Select games to add' } elseif ($c -eq 1) { 'Add 1 game to Steam' } else { "Add $c games to Steam" }
+  $ui.SelectAll.Text = if ($c -eq $cards.Count -and $c -gt 0) { 'Clear selection' } else { 'Select all' }
+}
+function Set-Selected($card, [bool]$on) {
+  $card.Selected = $on
+  $vis = if ($on) { 'Visible' } else { 'Collapsed' }
+  $card.Check.Visibility = $vis; $card.Shade.Visibility = $vis
+  $card.Root.BorderBrush = if ($on) { $win.FindResource('Accent') } else { [Windows.Media.Brushes]::Transparent }
+}
+$inSteam = Get-InSteam
+for ($i = 0; $i -lt $games.Count; $i++) {
+  $g = $games[$i]
+  $root = [Windows.Markup.XamlReader]::Parse($cardXaml)
+  $card = [pscustomobject]@{ Root = $root; Check = $root.FindName('Check'); Shade = $root.FindName('Shade'); Id = $root.FindName('SteamId'); Badge = $root.FindName('InSteam'); Selected = $false; Game = $g }
+  $root.FindName('Title').Text = $g.Name
+  $root.FindName('Initials').Text = (($g.Name -split '\s+' | Where-Object { $_ -match '^\w' } | Select-Object -First 2 | ForEach-Object { $_.Substring(0, 1) }) -join '').ToUpper()
+  if ($inSteam[$g.Name]) { $card.Badge.Visibility = 'Visible' }
+  $hint = $root.FindName('IdHint')
+  $card.Id.Tag = $hint
+  $card.Id.Add_TextChanged({ param($s, $e) $s.Tag.Visibility = if ($s.Text) { 'Collapsed' } else { 'Visible' } })
+  # portrait cover from Epic (WPF downloads it in the background)
+  $u = ($g.Images | Where-Object { $_.type -eq 'DieselGameBoxTall' } | Select-Object -First 1).url
+  if (-not $u) { $u = ($g.Images | Where-Object { $_.type -in 'OfferImageTall', 'Thumbnail' } | Select-Object -First 1).url }
+  if ($u) {
+    try {
+      $bi = New-Object Windows.Media.Imaging.BitmapImage
+      $bi.BeginInit(); $bi.UriSource = [uri]$u; $bi.DecodePixelWidth = 360; $bi.CacheOption = 'OnLoad'; $bi.EndInit()
+      $br = New-Object Windows.Media.ImageBrush $bi; $br.Stretch = 'UniformToFill'
+      $root.FindName('Cover').Background = $br
+    } catch {}
+  }
+  $pick = $root.FindName('Pick'); $pick.Tag = $card
+  $pick.Add_MouseLeftButtonUp({ param($s, $e) $c = $s.Tag; Set-Selected $c (-not $c.Selected); Update-Go })
+  $root.Add_MouseEnter({ param($s, $e) if ($s.BorderBrush -eq [Windows.Media.Brushes]::Transparent) { $s.Background = (New-Object Windows.Media.BrushConverter).ConvertFrom('#202835') } })
+  $root.Add_MouseLeave({ param($s, $e) $s.Background = (New-Object Windows.Media.BrushConverter).ConvertFrom('#1A2029') })
+  [void]$ui.Cards.Children.Add($root); [void]$cards.Add($card)
+}
+$ui.GameCount.Text = "$($games.Count) found"
+if (-not $games.Count) { $ui.Empty.Visibility = 'Visible' }
+$ui.SelectAll.Add_MouseLeftButtonUp({
+  $all = @($cards | Where-Object { $_.Selected }).Count -lt $cards.Count
+  foreach ($c in $cards) { Set-Selected $c $all }; Update-Go
 })
-$sdb.Add_Click({
-  $row = $grid.CurrentRow; if (-not $row) { return }
-  $id = [string]$row.Cells[2].Value
-  $url = if ($id -match '^\d+$') { "https://steamdb.info/app/$id/" } else { "https://steamdb.info/search/?a=app&q=" + [uri]::EscapeDataString([string]$row.Cells[1].Value) }
-  Start-Process $url
+Update-Go
+
+# ---- art source ----
+$ui.KeyBox.Password = (Get-SgdbKey)
+$setHint = {
+  $ui.KeyRow.Visibility = if ($ui.ArtSgdb.IsChecked) { 'Visible' } else { 'Collapsed' }
+  $ui.ArtHint.Text = if ($ui.ArtSgdb.IsChecked) { 'Community art from SteamGridDB. Missing pictures come from Steam, then Epic.' }
+                     elseif ($ui.ArtSteam.IsChecked) { 'Official Steam store art. Games not on Steam use Epic art.' }
+                     else { "Epic's own art. Always available." }
+}
+foreach ($rb in $ui.ArtEpic, $ui.ArtSteam, $ui.ArtSgdb) { $rb.Add_Checked($setHint) }
+if ($ui.KeyBox.Password) { $ui.ArtSgdb.IsChecked = $true } else { $ui.ArtEpic.IsChecked = $true }
+& $setHint
+$ui.KeyLink.Add_MouseLeftButtonUp({ Start-Process 'https://www.steamgriddb.com/profile/preferences/api' })
+
+# ---- buttons ----
+$ui.FindBtn.Add_Click({
+  $ui.FindBtn.IsEnabled = $false; $ui.Log.Clear(); $ui.Banner.Visibility = 'Collapsed'
+  foreach ($c in $cards) {
+    $hit = Find-SteamAppId $c.Game.Name
+    if ($hit) { $c.Id.Text = $hit.Id; & $log "$($c.Game.Name) -> $($hit.Name) ($($hit.Id))$(if (-not $hit.Exact) { '  <- check this one' })" }
+    else { & $log "$($c.Game.Name) -> not on Steam (Epic art will be used)" }
+  }
+  if (-not $ui.ArtSgdb.IsChecked) { $ui.ArtSteam.IsChecked = $true }
+  $ui.FindBtn.IsEnabled = $true
 })
-$go.Add_Click({
-  $grid.EndEdit()
+$ui.DbBtn.Add_Click({
+  $c = @($cards | Where-Object { $_.Selected }) | Select-Object -First 1
+  if (-not $c) { $c = $cards | Select-Object -First 1 }
+  if (-not $c) { return }
+  $id = $c.Id.Text.Trim()
+  Start-Process $(if ($id -match '^\d+$') { "https://steamdb.info/app/$id/" } else { "https://steamdb.info/search/?a=app&q=" + [uri]::EscapeDataString($c.Game.Name) })
+})
+$ui.GoBtn.Add_Click({
+  $ui.Banner.Visibility = 'Collapsed'
   $sel = @()
-  for ($i = 0; $i -lt $games.Count; $i++) {
-    if ($grid.Rows[$i].Cells[0].Value -eq $true) {
-      $id = ([string]$grid.Rows[$i].Cells[2].Value).Trim()
-      $games[$i].SteamId = if ($id -match '^\d+$') { $id } else { $null }
-      $sel += $games[$i]
-    }
-  }
-  $acc = @(); foreach ($i in $al.CheckedIndices) { $acc += $accounts[$i] }
-  if (-not $sel -or -not $acc) { [Windows.Forms.MessageBox]::Show('Tick at least one game and one Steam account.') | Out-Null; return }
-  $k = $key.Text.Trim()
+  foreach ($c in $cards) { if ($c.Selected) { $id = $c.Id.Text.Trim(); $c.Game.SteamId = if ($id -match '^\d+$') { $id } else { $null }; $sel += $c.Game } }
+  $acc = @(); for ($i = 0; $i -lt $accounts.Count; $i++) { if ($accSwitches[$i].IsChecked) { $acc += $accounts[$i] } }
+  if (-not $acc) { Show-Banner 'Turn on at least one Steam account.' $false; return }
+  $k = $ui.KeyBox.Password.Trim()
   if ($k -ne (Get-SgdbKey)) { if ($k) { [IO.File]::WriteAllText($SgdbKeyFile, $k) } elseif (Test-Path $SgdbKeyFile) { Remove-Item $SgdbKeyFile } }
-  if ($rSgdb.Checked -and -not $k) { [Windows.Forms.MessageBox]::Show('Paste your SteamGridDB API key first (or pick another art source).') | Out-Null; return }
-  $go.Enabled = $false; $out.Clear()
-  $src = if ($rSgdb.Checked) { 'SteamGridDB' } elseif ($rSteam.Checked) { 'Steam' } else { 'Epic' }
-  try { Invoke-Make $sel $acc $ml.Checked $log $src; [Windows.Forms.MessageBox]::Show('All done!') | Out-Null }
-  catch { & $log "ERROR: $($_.Exception.Message)"; [Windows.Forms.MessageBox]::Show("Something went wrong:`n$($_.Exception.Message)") | Out-Null }
-  $go.Enabled = $true
+  if ($ui.ArtSgdb.IsChecked -and -not $k) { Show-Banner 'Paste your SteamGridDB API key first, or pick another art source.' $false; return }
+  $src = if ($ui.ArtSgdb.IsChecked) { 'SteamGridDB' } elseif ($ui.ArtSteam.IsChecked) { 'Steam' } else { 'Epic' }
+  $ui.GoBtn.IsEnabled = $false; $ui.FindBtn.IsEnabled = $false; $ui.Log.Clear(); $win.Cursor = [Windows.Input.Cursors]::Wait
+  $ui.GoBtn.Content = 'Working...'
+  try {
+    Invoke-Make $sel $acc ([bool]$ui.Moonlight.IsChecked) $log $src
+    Show-Banner "Done! $($sel.Count) game$(if ($sel.Count -ne 1) { 's' }) added to Steam." $true
+    $now = Get-InSteam; foreach ($c in $cards) { if ($now[$c.Game.Name]) { $c.Badge.Visibility = 'Visible' }; Set-Selected $c $false }
+  }
+  catch { & $log "ERROR: $($_.Exception.Message)"; Show-Banner "Something went wrong: $($_.Exception.Message)" $false }
+  $win.Cursor = $null; $ui.FindBtn.IsEnabled = $true; Update-Go
 })
-[void]$f.ShowDialog()
+
+if ($Snapshot) {
+  for ($i = 0; $i -lt $accSwitches.Count; $i++) {
+    $sp = $accSwitches[$i].Content
+    $sp.Children[0].Text = @('Player One', 'Player Two', 'Living Room')[$i % 3]
+    $sp.Children[1].Text = 'Steam ID ' + (12345678 + $i * 1111111)
+  }
+  if ($cards.Count) { Set-Selected $cards[0] $true; Update-Go }
+  $ui.Log.Text = "Grand Theft Auto V Enhanced -> Grand Theft Auto V Enhanced (3240220)`r`n== Grand Theft Auto V Enhanced`r`n   SteamGridDB match: Grand Theft Auto V Enhanced`r`n   cover art: hero, wide, logo, tall`r`n   loading screen: 11 photo(s)"
+  $win.Add_ContentRendered({
+    $tm = New-Object Windows.Threading.DispatcherTimer; $tm.Interval = [TimeSpan]::FromSeconds(6)
+    $tm.Add_Tick({
+      param($s, $e) $s.Stop()
+      $c = $win.Content
+      $rtb = New-Object Windows.Media.Imaging.RenderTargetBitmap ([int]$c.ActualWidth), ([int]$c.ActualHeight), 96, 96, ([Windows.Media.PixelFormats]::Pbgra32)
+      $bgv = New-Object Windows.Media.DrawingVisual; $dc = $bgv.RenderOpen(); $dc.DrawRectangle($win.Background, $null, (New-Object Windows.Rect 0, 0, $c.ActualWidth, $c.ActualHeight)); $dc.Close(); $rtb.Render($bgv)
+      $rtb.Render($c)
+      $enc2 = New-Object Windows.Media.Imaging.PngBitmapEncoder; $enc2.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($rtb))
+      $fs = [IO.File]::Create($Snapshot); $enc2.Save($fs); $fs.Close(); $win.Close()
+    })
+    $tm.Start()
+  })
+}
+[void]$win.ShowDialog()
