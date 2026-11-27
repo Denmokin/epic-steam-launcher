@@ -3,6 +3,8 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Windows.Forms;
+[assembly: System.Reflection.AssemblyTitle("Epic to Steam")]
+[assembly: System.Reflection.AssemblyDescription("Adds your Epic Games Store games to Steam")]
 
 static class EpicToSteam
 {

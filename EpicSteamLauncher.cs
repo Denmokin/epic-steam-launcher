@@ -25,6 +25,8 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+[assembly: System.Reflection.AssemblyTitle("Epic to Steam game launcher")]
+[assembly: System.Reflection.AssemblyDescription("Starts an Epic Games Store game from Steam and shows a loading screen")]
 
 static class EpicSteamLauncher
 {

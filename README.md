@@ -67,7 +67,7 @@ No .NET, Python or other runtimes are needed. Everything uses what Windows alrea
    > Avoid folders under `AppData`.
 3. Double-click **`EpicToSteam.exe`**.
 
-   Windows SmartScreen may warn you because the programs aren't code-signed. Click **More info → Run anyway**, or build them yourself from source (see [Build from source](#build-from-source)).
+   Windows SmartScreen may warn you because the programs aren't code-signed. Click **More info → Run anyway**, or build them yourself from source (see [Build from source](#build-from-source)). If Windows Defender later removes `EpicSteamLauncher.exe`, see [the FAQ](#faq--troubleshooting).
 
 ## How to use
 
@@ -114,8 +114,15 @@ Epic has to be started *by Steam's chain* for the overlay to work. If Epic is do
 **A Rockstar game asked for admin rights / showed "Failed to launch Steam".**
 Run the app again for that game. It adds `-skipInstallers` to the game's Epic launch options and removes Steam's markers for the Rockstar launcher.
 
+**Windows Defender removed `EpicSteamLauncher.exe` / says it's a trojan.**
+This is a false alarm. Defender's machine-learning check (names ending in `!ml`, such as `Trojan:Win32/Bearfoos.A!ml`) sometimes flags small, unsigned programs that close other programs and hide their windows, which is what the launcher does while a game loads. Without the file, no game shortcut starts. To fix it:
+1. Open **Windows Security → Virus & threat protection → Protection history**, pick the entry for `EpicSteamLauncher.exe` and choose **Actions → Restore** (or just unzip the release again).
+2. So it doesn't happen again, add the app folder under **Virus & threat protection settings → Exclusions → Add an exclusion → Folder**. Or, in an admin PowerShell: `Add-MpPreference -ExclusionPath "C:\Games\EpicToSteam"` (use your folder).
+
+If you'd rather not trust a downloaded build, [build it yourself](#build-from-source); the source is all here. You can also report the false positive to Microsoft at [microsoft.com/wdsi/filesubmission](https://www.microsoft.com/wdsi/filesubmission).
+
 **The game doesn't start.**
-Check `log.txt` in the app folder. A common cause is a folder under `AppData` (some packaged apps redirect writes there), so move the folder somewhere else and add the games again.
+Check `log.txt` in the app folder. If the folder no longer contains `EpicSteamLauncher.exe`, see the Defender question above. A common cause is a folder under `AppData` (some packaged apps redirect writes there), so move the folder somewhere else and add the games again.
 
 **The loading screen stays up / doesn't show art.**
 Press **Esc** to close it. Pictures are taken from the Steam grid art and from `art\<shortcut id>\` in the app folder.
@@ -159,6 +166,7 @@ This uses the C# compiler that comes with Windows (.NET Framework 4) and produce
 | `Loader.cs` | The loading screen (WPF) |
 | `ShortcutMaker.ps1` | The app: finds Epic games, writes Steam shortcuts and art, and updates Sunshine |
 | `EpicToSteam.cs` | A tiny starter that opens the app without a console window |
+| `AssemblyInfo.cs`, `app.manifest` | Version details and "never needs admin" setting for both programs |
 
 ## Privacy
 
