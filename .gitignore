@@ -2,3 +2,5 @@
 log.txt
 *.bak-*
 steamgriddb.key
+art/
+loadtimes.txt

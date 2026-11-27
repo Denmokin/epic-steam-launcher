@@ -52,6 +52,8 @@ Turn **off** Epic's "start on boot". The launcher closes Epic before each launch
 | `--timeout <s>` | Give up if the game hasn't started (default 300) |
 | `--grace <s>` | Wait after the game exits in case it restarts (default 8) |
 | `--epic-exe <path>` | Epic launcher exe (default: read from the `com.epicgames.launcher` URL handler) |
+| `--loader` | Fullscreen loading screen until the game's window appears: slideshow (slow zoom, crossfades) of the photos in `art\<shortcut id>\` (filled by the Shortcut Maker from SteamGridDB, Steam screenshots and Epic art), the logo, a spinner, what's happening now, and a progress bar that learns each game's load time (`loadtimes.txt`). Esc closes it. |
+| `--title <name>` | Title shown when there's no logo |
 | `--dry-run` | Log what would happen, change nothing |
 
 ## Notes

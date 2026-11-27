@@ -143,7 +143,7 @@ function Save-Shortcuts($path, $list) {
 }
 
 function New-ShortcutEntry($g, [uint32]$appid) {
-  $opts = "--chain --hide-launchers --uri `"$($g.Uri)`" --game $($g.Game)" + (($g.Kill | ForEach-Object { " --kill-path `"$_`"" }) -join '')
+  $opts = "--chain --hide-launchers --loader --title `"$($g.Name -replace '"','')`" --uri `"$($g.Uri)`" --game $($g.Game)" + (($g.Kill | ForEach-Object { " --kill-path `"$_`"" }) -join '')
   [ordered]@{
     appid = (ToSigned $appid); AppName = $g.Name; Exe = "`"$Launcher`""; StartDir = "$Here\"   # unquoted + trailing \ (quotes break CreateProcess)
     icon = $g.Icon; ShortcutPath = ''; LaunchOptions = $opts; IsHidden = 0; AllowDesktopConfig = 1; AllowOverlay = 1
@@ -246,6 +246,51 @@ function Get-SgdbArt($gameId, $tmp) {
   $art
 }
 
+# Photos for the loading screen slideshow: art\<appid>\ next to the launcher.
+# SteamGridDB backgrounds (needs the key), Steam store screenshots, Epic's wide images.
+function Save-Backgrounds($g, [uint32]$appid, $log) {
+  $dir = Join-Path $Here "art\$appid"
+  $tmp = Join-Path $env:TEMP "esl-bg-$appid"
+  Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+  New-Item -ItemType Directory -Force $tmp | Out-Null
+  $urls = New-Object System.Collections.Generic.List[string]
+  if (Get-SgdbKey) {
+    try {
+      $sg = Find-SgdbGame $g.Name $g.SteamId
+      if ($sg) { @(Invoke-Sgdb "heroes/game/$($sg.Id)?types=static&mimes=image/png,image/jpeg") | Select-Object -First 5 | ForEach-Object { $urls.Add($_.url) } }
+    } catch {}
+  }
+  $sid = $g.SteamId
+  if (-not $sid) { $hit = Find-SteamAppId $g.Name; if ($hit -and $hit.Exact) { $sid = $hit.Id } }
+  if ($sid) {
+    try {
+      $d = Invoke-RestMethod "https://store.steampowered.com/api/appdetails?appids=$sid&filters=screenshots" -UseBasicParsing -TimeoutSec 20
+      @($d.$sid.data.screenshots) | Select-Object -First 6 | ForEach-Object { if ($_.path_full) { $urls.Add(($_.path_full -replace '\?.*$', '')) } }
+    } catch {}
+  }
+  foreach ($t in 'DieselStoreFrontWide', 'OfferImageWide', 'DieselGameBox') {
+    $u = ($g.Images | Where-Object { $_.type -eq $t } | Select-Object -First 1).url
+    if ($u -and -not $urls.Contains($u)) { $urls.Add($u) }
+  }
+  $n = 0
+  foreach ($u in $urls) {
+    $ext = [IO.Path]::GetExtension(([uri]$u).AbsolutePath).ToLower(); if ($ext -notin '.jpg', '.jpeg', '.png') { $ext = '.jpg' }
+    $dst = Join-Path $tmp ("bg{0:00}{1}" -f ($n + 1), $ext)
+    try {
+      Invoke-WebRequest $u -OutFile $dst -UseBasicParsing -TimeoutSec 30
+      $img = [Drawing.Image]::FromFile($dst); $ok = $img.Width -ge 1000; $img.Dispose()   # skip small pictures
+      if ($ok) { $n++ } else { Remove-Item $dst }
+    } catch { Remove-Item $dst -ErrorAction SilentlyContinue }
+  }
+  if ($n -gt 0) {
+    if ($Test) { & $log "   [test] would save $n loading-screen photo(s)"; return }
+    Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force (Split-Path $dir) | Out-Null
+    Move-Item $tmp $dir
+    & $log "   loading screen: $n photo(s)"
+  } else { & $log '   loading screen: no extra photos found (uses the cover art)' }
+}
+
 function Install-Art($art, $gridDir, [uint32]$appid) {
   New-Item -ItemType Directory -Force $gridDir | Out-Null
   if ($art.tall) { Save-Fitted $art.tall (Join-Path $gridDir "${appid}p.jpg") 600 900 }
@@ -299,6 +344,7 @@ function Invoke-Make($games, $accounts, [bool]$moonlight, $log, [string]$artSour
       if ($Test) { & $log "   [test] would write $path" } else { Save-Shortcuts $path $list; Install-Art $art "$cfg\grid" $appid }
       & $log "   added to Steam account $($a.Name)"
     }
+    Save-Backgrounds $g $appid $log
     if ($moonlight) { $tiles += @{ Name = $g.Name; AppId = $appid; Art = $art.tall } }
   }
   if ($tiles -and -not $Test) { Add-MoonlightTiles $tiles $log }

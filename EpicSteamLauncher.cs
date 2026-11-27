@@ -11,6 +11,9 @@
 // Usage (Steam launch options):
 //   --uri "<com.epicgames.launcher://...>" --game GTA5_Enhanced [--timeout 300] [--grace 8]
 //   [--kill-path "Rockstar Games\Launcher"] [--chain] [--hide-launchers [--hide-for 90]] [--dry-run]
+//   [--loader [--title "Game name"]]
+//   --loader: fullscreen loading screen (Steam hero art + logo, spinner, status, learned progress bar)
+//   until the game's window appears.
 //   --hide-launchers (chain mode): hides Epic/publisher launcher windows while the game loads; if the
 //   game hasn't started after --hide-for seconds they are shown again (sign-in or update may need input).
 //   Launched from Big Picture -> Big Picture is brought back when the game ends.
@@ -116,6 +119,114 @@ static class EpicSteamLauncher
             return true;
         }, IntPtr.Zero);
     }
+    // ---- loading screen helpers ----
+    // the shortcut's art from Steam's grid folder (Steam tells us the shortcut via SteamGameId)
+    // backgrounds: every picture in art\<appid>\ next to the exe (the Shortcut Maker fills it), plus Steam's hero
+    static void FindArt(out List<string> backgrounds, out string logo)
+    {
+        backgrounds = new List<string>(); logo = null; string hero = null;
+        try
+        {
+            ulong gid; if (!ulong.TryParse(Environment.GetEnvironmentVariable("SteamGameId") ?? "", out gid)) return;
+            uint appid = (uint)(gid >> 32); if (appid == 0) return;
+            string artDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "art", appid.ToString());
+            if (Directory.Exists(artDir))
+                foreach (var f in Directory.GetFiles(artDir))
+                {
+                    string ext = Path.GetExtension(f).ToLowerInvariant();
+                    if (ext == ".jpg" || ext == ".jpeg" || ext == ".png")
+                    {
+                        if (Path.GetFileNameWithoutExtension(f).Equals("logo", StringComparison.OrdinalIgnoreCase)) logo = f; else backgrounds.Add(f);
+                    }
+                }
+            string steam = (string)Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath", null);
+            if (steam == null) return;
+            string user = Convert.ToString(Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam\ActiveProcess", "ActiveUser", 0));
+            var dirs = new List<string>();
+            string ud = Path.Combine(steam.Replace('/', '\\'), "userdata");
+            if (user != "0") dirs.Add(Path.Combine(ud, user, "config", "grid"));
+            if (Directory.Exists(ud)) foreach (var d in Directory.GetDirectories(ud)) dirs.Add(Path.Combine(d, "config", "grid"));
+            foreach (var g in dirs)
+            {
+                if (hero == null) foreach (var n in new[] { appid + "_hero.jpg", appid + "_hero.png", appid + ".jpg", appid + ".png" }) { var p = Path.Combine(g, n); if (File.Exists(p)) { hero = p; break; } }
+                if (logo == null) { var p = Path.Combine(g, appid + "_logo.png"); if (File.Exists(p)) logo = p; }
+                if (hero != null && logo != null) break;
+            }
+        }
+        catch { }
+        if (hero != null && !backgrounds.Contains(hero)) backgrounds.Add(hero);
+    }
+
+    // learned load time per game (seconds until its window appears)
+    static string TimesPath { get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "loadtimes.txt"); } }
+    static double GetLoadTime(string game)
+    {
+        try { foreach (var l in File.ReadAllLines(TimesPath)) { var p = l.Split('='); double v; if (p.Length == 2 && p[0].Equals(game, StringComparison.OrdinalIgnoreCase) && double.TryParse(p[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v)) return v; } }
+        catch { }
+        return 0;
+    }
+    static void SaveLoadTime(string game, double secs)
+    {
+        try
+        {
+            double old = GetLoadTime(game);
+            double v = old > 0 ? old * 0.6 + secs * 0.4 : secs;   // smooth over launches
+            var lines = new List<string>();
+            if (File.Exists(TimesPath)) foreach (var l in File.ReadAllLines(TimesPath)) if (!l.StartsWith(game + "=", StringComparison.OrdinalIgnoreCase)) lines.Add(l);
+            lines.Add(game + "=" + v.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture));
+            File.WriteAllLines(TimesPath, lines.ToArray());
+        }
+        catch { }
+    }
+
+    // "what is happening now", from the newest interesting process in the chain
+    static string StageText(Process epic, string game)
+    {
+        if (Find(game).Length > 0) return "Loading game...";
+        if (epic == null) return "Starting...";
+        string best = null; DateTime bestT = DateTime.MinValue; bool antiCheat = false;
+        foreach (var p in Process.GetProcesses())
+            try { if (p.ProcessName.EndsWith("_BE", StringComparison.OrdinalIgnoreCase) && p.ProcessName.StartsWith(game, StringComparison.OrdinalIgnoreCase)) antiCheat = true; } catch { }
+        try
+        {
+            foreach (var pid in Descendants(epic.Id, "\0"))
+            {
+                try
+                {
+                    var p = Process.GetProcessById((int)pid);
+                    string n = p.ProcessName;
+                    if (n.EndsWith("_BE", StringComparison.OrdinalIgnoreCase) || n.StartsWith("BEService", StringComparison.OrdinalIgnoreCase)) { antiCheat = true; continue; }
+                    string path = ProcPath(p); if (path.Length == 0) continue;
+                    string desc = FileVersionInfo.GetVersionInfo(path).FileDescription ?? "";
+                    string low = (n + " " + desc).ToLowerInvariant();
+                    if (low.Contains("epicgameslauncher") || low.Contains("webview") || low.Contains("helper") || low.Contains("handler") || low.Contains("service") || low.Contains("crash") || low.Contains("redirector") || desc.Trim().Length == 0) continue;
+                    DateTime t = p.StartTime;
+                    if (t > bestT) { bestT = t; best = desc.Trim(); }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        if (antiCheat) return "Starting anti-cheat...";
+        if (best != null) return "Starting " + best + "...";
+        return "Connecting to Epic Games...";
+    }
+    // anti-cheat protected games refuse process queries (MainWindowHandle stays 0), so look at the windows themselves
+    static bool HasVisibleWindow(string game)
+    {
+        var pids = new HashSet<uint>();
+        foreach (var p in Find(game)) pids.Add((uint)p.Id);
+        if (pids.Count == 0) return false;
+        bool found = false;
+        EnumWindows((hwnd, l) =>
+        {
+            uint pid; GetWindowThreadProcessId(hwnd, out pid);
+            if (pids.Contains(pid) && IsWindowVisible(hwnd)) { found = true; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
     static void UnhideAll()
     {
         foreach (var h in hidden) ShowWindow(h, 5 /* SW_SHOW */);
@@ -131,7 +242,8 @@ static class EpicSteamLauncher
         try { if (File.Exists(logPath) && new FileInfo(logPath).Length > 512 * 1024) File.Delete(logPath); } catch { }
 
         string uri = null, game = null, epicExe = null; var killPaths = new List<string>();
-        int timeout = 300, grace = 8, hideFor = 90; bool dry = false, chain = false, hide = false;
+        int timeout = 300, grace = 8, hideFor = 90; bool dry = false, chain = false, hide = false, loader = false;
+        string title = null;
         for (int i = 0; i < args.Length; i++)
         {
             string a = args[i].ToLowerInvariant();
@@ -144,6 +256,8 @@ static class EpicSteamLauncher
             else if (a == "--epic-exe" && next != null) { epicExe = next; i++; }
             else if (a == "--chain") chain = true;
             else if (a == "--hide-launchers") hide = true;
+            else if (a == "--loader") loader = true;
+            else if (a == "--title" && next != null) { title = next; i++; }
             else if (a == "--hide-for" && next != null) { int.TryParse(next, out hideFor); i++; }
             else if (a == "--dry-run") dry = true;
         }
@@ -154,6 +268,19 @@ static class EpicSteamLauncher
         if (string.IsNullOrEmpty(uri) || string.IsNullOrEmpty(game)) { Log("ERROR: --uri and --game are required"); return 2; }
         if (chain && epicExe == null) epicExe = EpicExeFromRegistry();
         if (chain && (epicExe == null || !File.Exists(epicExe))) { Log("chain: Epic exe not found (" + epicExe + "); falling back to normal launch"); chain = false; }
+
+        // loading screen (covers Big Picture / desktop until the game's window shows up)
+        var total = Stopwatch.StartNew();
+        double expected = GetLoadTime(game);
+        loader = loader && !dry && Find(game).Length == 0;
+        if (loader)
+        {
+            List<string> bgs; string logoArt; FindArt(out bgs, out logoArt);
+            Loader.Status = "Starting...";
+            Loader.Progress = expected > 0 ? 0f : -1f;
+            Loader.Show(title ?? game, bgs, logoArt);
+            Log("loader shown (" + bgs.Count + " background(s)" + (logoArt != null ? " + logo" : "") + ", expected " + (int)expected + "s)");
+        }
 
         // 1. launch through Epic (skip if the game is already running)
         Process epic = null;
@@ -200,20 +327,54 @@ static class EpicSteamLauncher
         bool fromBigPicture = Environment.GetEnvironmentVariable("SteamGamepadUI") != null || Environment.GetEnvironmentVariable("SteamTenfoot") != null;
         hide = hide && chain && epic != null && !dry;
         var sw = Stopwatch.StartNew();
+        Action updateLoader = () =>
+        {
+            if (!loader || !Loader.Visible) return;
+            Loader.Status = StageText(epic, game);
+            if (expected > 0) Loader.Progress = (float)(0.95 * Math.Min(1.0, total.Elapsed.TotalSeconds / expected));
+        };
         while (Find(game).Length == 0)
         {
-            if (sw.Elapsed.TotalSeconds > timeout) { UnhideAll(); Log("game did not start within " + timeout + "s; exiting"); return 1; }
+            if (sw.Elapsed.TotalSeconds > timeout) { UnhideAll(); if (loader) Loader.Close(); Log("game did not start within " + timeout + "s; exiting"); return 1; }
             if (hide)
             {
                 if (sw.Elapsed.TotalSeconds < hideFor) { try { HideWindowsOf(Descendants(epic.Id, game)); } catch { } }
-                else { Log("game not started after " + hideFor + "s; showing launcher windows (sign-in or update may need you)"); UnhideAll(); hide = false; }
+                else
+                {
+                    Log("game not started after " + hideFor + "s; showing launcher windows (sign-in or update may need you)");
+                    UnhideAll(); hide = false;
+                    if (loader) { Loader.Close(); loader = false; }
+                }
             }
-            Thread.Sleep(hide ? 250 : 1000);
+            updateLoader();
+            Thread.Sleep(hide || loader ? 250 : 1000);
         }
         Log("game running after " + (int)sw.Elapsed.TotalSeconds + "s");
-        if (hide) { var t = Stopwatch.StartNew(); while (t.Elapsed.TotalSeconds < 10) { try { HideWindowsOf(Descendants(epic.Id, game)); } catch { } Thread.Sleep(500); } }
+
+        // keep hiding launchers for a few seconds, and keep the loading screen up until the game's window appears
+        var after = Stopwatch.StartNew();
+        while (Find(game).Length > 0)
+        {
+            bool hiding = hide && after.Elapsed.TotalSeconds < 10;
+            if (hiding) { try { HideWindowsOf(Descendants(epic.Id, game)); } catch { } }
+            if (loader && Loader.Visible)
+            {
+                if (HasVisibleWindow(game))
+                {
+                    SaveLoadTime(game, total.Elapsed.TotalSeconds);
+                    Log("game window up after " + (int)total.Elapsed.TotalSeconds + "s; closing loader");
+                    Loader.Progress = 1f; Loader.Status = "Ready"; Thread.Sleep(300);
+                    Loader.Close();
+                }
+                else if (after.Elapsed.TotalSeconds > 120) { Log("no game window after 120s; closing loader"); Loader.Close(); }
+                else updateLoader();
+            }
+            if (!hiding && !(loader && Loader.Visible)) break;
+            Thread.Sleep(250);
+        }
+        if (loader) Loader.Close();
         // report which processes in the chain carry Steam's overlay (the game itself may refuse inspection under anti-cheat)
-        Thread.Sleep(hide ? 5000 : 15000);
+        Thread.Sleep(5000);
         foreach (var name in new[] { "EpicGamesLauncher", "PlayGTAV", "Launcher", game })
             foreach (var p in Find(name))
                 Log("overlay check " + name + " pid " + p.Id + ": " + OverlayState(p));
